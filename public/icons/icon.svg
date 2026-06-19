@@ -1,0 +1,40 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Monkey Browser AI — monkey-head silhouette (no tile), with a curling
+       prehensile-tail spiral as the brand nod. Transparent background. -->
+  <defs>
+    <linearGradient id="fur" x1="20" y1="8" x2="108" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7c6bff"/>
+      <stop offset="1" stop-color="#5a3df0"/>
+    </linearGradient>
+  </defs>
+
+  <g fill="url(#fur)">
+    <!-- ears -->
+    <circle cx="34" cy="46" r="17"/>
+    <circle cx="94" cy="46" r="17"/>
+    <!-- head -->
+    <ellipse cx="64" cy="56" rx="38" ry="36"/>
+    <!-- curling tail sweeping down-right from the head, ending in a spiral -->
+    <path
+      d="M92 78
+         c 14 6 22 20 18 34
+         c -3 11 -14 18 -25 15
+         c -9 -2 -14 -11 -11 -19
+         c 2 -7 9 -10 15 -7
+         c 5 3 6 9 3 13"
+      fill="none" stroke="url(#fur)" stroke-width="11" stroke-linecap="round"/>
+  </g>
+
+  <!-- inner face (muzzle area) cut as a lighter shape -->
+  <ellipse cx="64" cy="62" rx="24" ry="22" fill="#efeaff"/>
+  <!-- inner ears -->
+  <circle cx="34" cy="46" r="8" fill="#efeaff"/>
+  <circle cx="94" cy="46" r="8" fill="#efeaff"/>
+
+  <!-- eyes -->
+  <circle cx="54" cy="56" r="4.5" fill="#3a2bb0"/>
+  <circle cx="74" cy="56" r="4.5" fill="#3a2bb0"/>
+  <!-- nostrils -->
+  <circle cx="59" cy="70" r="2.6" fill="#3a2bb0"/>
+  <circle cx="69" cy="70" r="2.6" fill="#3a2bb0"/>
+</svg>
