@@ -1,6 +1,6 @@
 <svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Monkey Browser AI — monkey-head silhouette (no tile), with a curling
-       prehensile-tail spiral as the brand nod. Transparent background. -->
+  <!-- Monkey Browser AI — monkey-head silhouette (face only, no tail).
+       Transparent background. -->
   <defs>
     <linearGradient id="fur" x1="20" y1="8" x2="108" y2="120" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#7c6bff"/>
@@ -14,15 +14,6 @@
     <circle cx="94" cy="46" r="17"/>
     <!-- head -->
     <ellipse cx="64" cy="56" rx="38" ry="36"/>
-    <!-- curling tail sweeping down-right from the head, ending in a spiral -->
-    <path
-      d="M92 78
-         c 14 6 22 20 18 34
-         c -3 11 -14 18 -25 15
-         c -9 -2 -14 -11 -11 -19
-         c 2 -7 9 -10 15 -7
-         c 5 3 6 9 3 13"
-      fill="none" stroke="url(#fur)" stroke-width="11" stroke-linecap="round"/>
   </g>
 
   <!-- inner face (muzzle area) cut as a lighter shape -->
