@@ -142,6 +142,18 @@ export function Settings({
           </span>
         </label>
 
+        <label className="field row">
+          <input
+            type="checkbox"
+            checked={draft.useHistory}
+            onChange={(e) => setDraft({ ...draft, useHistory: e.target.checked })}
+          />
+          <span>
+            Use browsing history to resolve URLs{" "}
+            <small>(lets “open Jira” find the right link from your history)</small>
+          </span>
+        </label>
+
         <div className="field">
           <span>
             Auto-approval rules{" "}

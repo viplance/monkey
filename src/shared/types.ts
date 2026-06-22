@@ -11,6 +11,7 @@ export type ActionKind =
   | "navigate"
   | "extract"
   | "waitFor"
+  | "searchHistory"
   | "done"
   | "ask";
 
@@ -160,6 +161,14 @@ export interface Settings {
   autoExecute: boolean;
   /** Per-action auto-approval rules. */
   autoRules: AutoRule[];
+  /**
+   * When true, the agent may search the browser history (chrome.history) to
+   * resolve a named destination (e.g. "open Jira") to a concrete URL. Lookups
+   * are local and on-demand — only a handful of matches are ever sent to the
+   * model — so this adds no per-query token cost unless the agent actually
+   * needs a URL it doesn't know.
+   */
+  useHistory: boolean;
 }
 
 /**
@@ -194,6 +203,7 @@ export const DEFAULT_SETTINGS: Settings = {
   model: "gemini-2.5-flash",
   autoExecute: false,
   autoRules: DEFAULT_RULES,
+  useHistory: true,
 };
 
 export const STORAGE_KEY = "gba.settings";

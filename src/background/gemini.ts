@@ -69,7 +69,14 @@ Your job:
 3. Only reference elements by their "ref" from the provided element map.
 Prefer asking a question over guessing when the page is ambiguous or when an
 action is destructive (delete, purchase, submit payment).
-Be concise. Never fabricate refs that are not in the element map.`;
+Be concise. Never fabricate refs that are not in the element map.
+
+URL resolution: when the task names a destination by name rather than URL
+(e.g. "open Jira", "go to our dashboard") and you do not know its exact URL,
+do NOT guess a public URL. Instead emit kind="searchHistory" with value set to
+a short search term (e.g. "jira"). The browser history will be searched locally
+and the matching URLs returned to you; then propose a navigate to the best
+match. Only fall back to asking the user if the search returns nothing useful.`;
 
 /** Tool the model calls to emit the plan. */
 const planTool = {
@@ -112,12 +119,17 @@ const actionTool = {
           "navigate",
           "extract",
           "waitFor",
+          "searchHistory",
           "done",
           "ask",
         ],
       },
       ref: { type: "string", description: "Element ref from the map" },
-      value: { type: "string", description: "Text to type / option / question" },
+      value: {
+        type: "string",
+        description:
+          "Text to type / option / question / history search term (kind=searchHistory)",
+      },
       url: { type: "string", description: "URL for navigate" },
       rationale: {
         type: "string",

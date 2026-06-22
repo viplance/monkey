@@ -6,7 +6,7 @@ export default defineManifest({
   version: "0.1.0",
   description:
     "Turn natural-language tickets into step-by-step, confirm-before-act browser automation driven by Gemini.",
-  permissions: ["sidePanel", "storage", "scripting", "activeTab", "tabs"],
+  permissions: ["sidePanel", "storage", "scripting", "activeTab", "tabs", "history"],
   // The agent must be able to read/act on whatever page the user is on, and
   // call the Gemini API. http(s)://*/* covers any normal web page; the Gemini
   // host is included explicitly. (Chrome:// and store pages are never
@@ -22,6 +22,11 @@ export default defineManifest({
   },
   action: {
     default_title: "Open Monkey Browser AI",
+    default_icon: {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png",
+    },
   },
   side_panel: {
     default_path: "src/sidepanel/index.html",
