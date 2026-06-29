@@ -30,6 +30,7 @@ export function App() {
   const [feedback, setFeedback] = useState("");
   const [tabKind, setTabKind] = useState<TabKind>("ok");
   const logRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Subscribe to background broadcasts + hydrate initial state.
   useEffect(() => {
@@ -51,6 +52,11 @@ export function App() {
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [state.messages]);
+
+  useEffect(() => {
+    if (showSettings) return;
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [showSettings]);
 
   // Track whether the active tab can be automated, so we can disable Go on
   // blocked pages. Re-check when the panel regains focus or tabs change.
@@ -112,7 +118,6 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <span className="brand">🐵 Monkey Browser AI</span>
         <div className="topbar-actions">
           <StatusPill status={state.status} />
           <button className="icon-btn" title="Settings" onClick={() => setShowSettings(true)}>
@@ -142,21 +147,32 @@ export function App() {
         <div className="banner banner-hint">💡 {state.notice}</div>
       )}
 
-      {state.plan.length > 0 && (
-        <section className="plan">
-          <div className="plan-head">Plan</div>
-          <ol>
-            {state.plan.map((s) => (
-              <li key={s.id} className={`step step-${s.status}`}>
-                <span className="step-icon">
-                  {s.status === "done" ? "✓" : s.status === "active" ? "▶" : "○"}
-                </span>
-                <span className="step-title" title={s.detail}>
-                  {s.title}
-                </span>
-              </li>
-            ))}
-          </ol>
+      {(state.ticket || state.plan.length > 0) && (
+        <section className="request-plan">
+          {state.ticket && (
+            <div className="request">
+              <div className="section-head">Request</div>
+              <div className="request-text">{state.ticket}</div>
+            </div>
+          )}
+
+          {state.plan.length > 0 && (
+            <div className="plan">
+              <div className="section-head">Plan</div>
+              <ol>
+                {state.plan.map((s) => (
+                  <li key={s.id} className={`step step-${s.status}`}>
+                    <span className="step-icon">
+                      {s.status === "done" ? "✓" : s.status === "active" ? "▶" : "○"}
+                    </span>
+                    <span className="step-title" title={s.detail}>
+                      {s.title}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
         </section>
       )}
 
@@ -230,6 +246,7 @@ export function App() {
 
       <div className="composer">
         <textarea
+          ref={inputRef}
           rows={2}
           placeholder={
             awaitingAnswer

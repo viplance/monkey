@@ -25,10 +25,9 @@ body {
 .app { display: flex; flex-direction: column; height: 100%; }
 
 .topbar {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; justify-content: flex-end;
   padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
 }
-.brand { font-weight: 600; }
 .topbar-actions { display: flex; align-items: center; gap: 8px; }
 .icon-btn {
   background: none; border: none; color: var(--text); cursor: pointer; font-size: 15px;
@@ -46,11 +45,25 @@ body {
 .link, .feedback ~ * a, a { color: var(--accent-2); }
 .link { background: none; border: none; cursor: pointer; text-decoration: underline; padding: 0; }
 
-.plan {
-  padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
-  max-height: 28vh; overflow-y: auto;
+.request-plan {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  max-height: 36vh;
+  overflow-y: auto;
 }
-.plan-head { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
+.request {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.request-text {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.plan {
+  padding: 8px 12px;
+}
+.section-head { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
 .plan ol { list-style: none; margin: 0; padding: 0; }
 .step { display: flex; gap: 8px; padding: 4px 0; align-items: baseline; }
 .step-icon { width: 14px; color: var(--muted); }
