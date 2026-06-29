@@ -406,6 +406,10 @@ async function proposeNext() {
     }
 
     if (action.kind === "ask") {
+      if (shouldFinishSatisfiedCloseRequest(action)) {
+        finishSatisfiedRequest("The popup is closed.");
+        return;
+      }
       if (shouldTreatAskAsResponse(action, step)) {
         if (shouldRetryTaskRestatement(action.rationale)) {
           stepHistory.push(
@@ -511,6 +515,37 @@ function shouldTreatAskAsResponse(action: AgentAction, step: PlanStep): boolean 
   return !looksLikeQuestion(action.rationale) && (hasExtractedText() || isReportingStep(step));
 }
 
+function isCloseOrDismissTicket(ticket: string | null): boolean {
+  return /(?:\b(?:close|dismiss|hide)\b|закро[йи]|закрыть|скро[йи]|убери|убрать)/i.test(
+    ticket ?? "",
+  );
+}
+
+function saysTargetIsAlreadyGone(text: string): boolean {
+  return /(?:no|not|none|nothing|нет|не)\s+(?:open|visible|present|found|открыт|видим|найден)|(?:already|уже)\s+(?:closed|gone|dismissed|закрыт|закрыто|нет)|(?:нет|no)\s+(?:popup|pop-up|modal|dialog|попап|модал|окн)/i.test(
+    text,
+  );
+}
+
+function hasSuccessfulCloseAction(): boolean {
+  return state.messages.some(
+    (m) =>
+      m.role === "agent" &&
+      /^(?:Click|Select|Type|Navigate|Scroll|Wait|Extract)\b/i.test(m.text) &&
+      /(?:close|dismiss|hide|закро|закры|скро|убер|popup|pop-up|modal|dialog|попап|модал)/i.test(
+        m.text,
+      ),
+  );
+}
+
+function shouldFinishSatisfiedCloseRequest(action: AgentAction): boolean {
+  return (
+    isCloseOrDismissTicket(state.ticket) &&
+    hasSuccessfulCloseAction() &&
+    saysTargetIsAlreadyGone(action.rationale)
+  );
+}
+
 function shouldRetryTaskRestatement(text: string): boolean {
   if (stepHistory.some((line) => line.includes("Model returned a task restatement as ask:"))) {
     return false;
@@ -571,6 +606,15 @@ function respondAndComplete(text: string) {
   pushMsg("agent", text);
   stepHistory.push(`✓ Responded to the user\nACTION: respond|ref=|value=|url=`);
   completeActiveStep();
+}
+
+function finishSatisfiedRequest(message: string) {
+  for (const step of state.plan) {
+    if (step.status !== "done") step.status = "done";
+  }
+  state.activeStepId = null;
+  pushMsg("agent", message);
+  finish();
 }
 
 async function executePending() {
