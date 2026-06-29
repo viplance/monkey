@@ -21,7 +21,19 @@ import {
   type Settings,
   type TabKind,
 } from "../shared/types";
+import { describe } from "./describe";
 import { listModels, nextAction, planTicket } from "./gemini";
+import {
+  actionSignature,
+  compact,
+  countCompletedActions,
+  hasMeaningfulExtract,
+  shouldFinishSatisfiedCloseRequest,
+  shouldRetryTaskRestatement,
+  shouldTreatAskAsResponse,
+} from "./heuristics";
+import { searchHistory } from "./history";
+import { NotAutomatableError, blankContext, classifyUrl, hostOf } from "./tabs";
 
 // --- state ----------------------------------------------------------------
 
@@ -38,15 +50,6 @@ let pendingHost = "";
  */
 let staleRetries = 0;
 const MAX_STALE_RETRIES = 3;
-
-/** Extract a bare host ("www.x.com" -> "x.com") for rule matching. */
-function hostOf(url: string): string {
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    return "";
-  }
-}
 
 /** Create + persist an auto-rule from an approved action. */
 async function addRuleFromAction(action: AgentAction, scope: "site" | "any") {
@@ -80,13 +83,6 @@ function isAutoApproved(action: AgentAction, host: string): boolean {
     return host === scope || host.endsWith("." + scope);
   });
 }
-
-/**
- * Thrown when the active tab is a page extensions can't touch (chrome://, the
- * Web Store, New Tab, other extensions). It's a normal situation, not a
- * failure, so it's surfaced as a soft notice rather than the error state.
- */
-class NotAutomatableError extends Error {}
 
 function freshState(): AgentState {
   return {
@@ -149,26 +145,6 @@ async function ensureSettings(): Promise<Settings> {
 
 // --- tab / content helpers ------------------------------------------------
 
-/**
- * Page automatability (TabKind from shared types):
- *  - "ok":      a real http(s) page we can snapshot and act on.
- *  - "blank":   a blank/New Tab page — can't be scripted, but the agent CAN
- *               navigate it to a real URL first, so it's a valid launchpad.
- *  - "blocked": chrome://, the Web Store, devtools, etc. — neither scriptable
- *               nor navigable by us; the user must switch tabs.
- */
-const BLANK_RE = /^(about:blank|chrome:\/\/newtab\/?|chrome:\/\/new-tab-page\/?|edge:\/\/newtab\/?)$/;
-const BLOCKED_RE = /^(chrome|edge|brave|opera|about|chrome-extension|devtools|view-source|file):/;
-
-function classifyUrl(url: string | undefined): TabKind {
-  if (!url) return "blank";
-  if (BLANK_RE.test(url)) return "blank";
-  if (BLOCKED_RE.test(url)) return "blocked";
-  if (url.startsWith("https://chromewebstore.google.com")) return "blocked";
-  if (/^https?:\/\//.test(url)) return "ok";
-  return "blocked";
-}
-
 async function activeTab(): Promise<{ id: number; kind: TabKind; url: string }> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) {
@@ -213,74 +189,6 @@ async function snapshotTab(tabId: number): Promise<PageContext> {
   const reply = await toContent(tabId, { type: "SNAPSHOT" });
   if (reply.type !== "SNAPSHOT_RESULT") throw new Error("Failed to read page.");
   return reply.context;
-}
-
-/**
- * Search the browser history for a destination the agent named but doesn't
- * know the URL of (e.g. "jira"). Returns a compact, de-duplicated list of the
- * most-visited matches as "title — url" lines, capped small so it costs the
- * model almost nothing. Returns an empty string when history is disabled or
- * nothing matches.
- */
-async function searchHistory(query: string): Promise<string> {
-  if (!settings.useHistory) return "";
-  if (!chrome.history?.search) return "";
-  const term = query.trim();
-  let items: chrome.history.HistoryItem[];
-  try {
-    items = await chrome.history.search({
-      text: term,
-      // Look back ~6 months; 0 startTime would also work but bounding it keeps
-      // the result set relevant.
-      startTime: Date.now() - 1000 * 60 * 60 * 24 * 180,
-      maxResults: 50,
-    });
-  } catch {
-    return "";
-  }
-
-  // Collapse to one entry per origin (the home/root is the useful target), rank
-  // by total visit count, and keep only the top few.
-  const byHost = new Map<string, { url: string; title: string; visits: number }>();
-  for (const it of items) {
-    if (!it.url) continue;
-    let host: string;
-    let origin: string;
-    try {
-      const u = new URL(it.url);
-      host = u.hostname.replace(/^www\./, "");
-      origin = u.origin;
-    } catch {
-      continue;
-    }
-    const prev = byHost.get(host);
-    const visits = (prev?.visits ?? 0) + (it.visitCount ?? 1);
-    // Prefer the shortest path as the representative URL (closest to the root).
-    const keepUrl =
-      !prev || it.url.length < prev.url.length ? origin || it.url : prev.url;
-    byHost.set(host, {
-      url: keepUrl,
-      title: it.title || prev?.title || host,
-      visits,
-    });
-  }
-
-  const top = Array.from(byHost.values())
-    .sort((a, b) => b.visits - a.visits)
-    .slice(0, 5);
-  if (!top.length) return "";
-  return top.map((m) => `${m.title} — ${m.url}`).join("\n");
-}
-
-/** A synthetic empty page so the planner navigates first from a blank tab. */
-function blankContext(url: string): PageContext {
-  return {
-    url: url || "about:blank",
-    title: "(blank tab)",
-    elements: [],
-    textExcerpt:
-      "This is a blank/new tab with no content. Navigate to the appropriate URL first.",
-  };
 }
 
 // --- core flow ------------------------------------------------------------
@@ -386,13 +294,13 @@ async function proposeNext() {
     );
     console.log("[GBA] Gemini proposed:", action);
 
-    if (action.kind === "extract" && hasMeaningfulExtract(action)) {
+    if (action.kind === "extract" && hasMeaningfulExtract(stepHistory, action)) {
       pushMsg("system", "Already extracted that content — moving to the next plan step.");
       completeActiveStep();
       return;
     }
 
-    if (action.kind === "scrollTo" && countCompletedActions("scrollTo") >= 3) {
+    if (action.kind === "scrollTo" && countCompletedActions(stepHistory, "scrollTo") >= 3) {
       action = {
         kind: "extract",
         rationale:
@@ -406,12 +314,12 @@ async function proposeNext() {
     }
 
     if (action.kind === "ask") {
-      if (shouldFinishSatisfiedCloseRequest(action)) {
+      if (shouldFinishSatisfiedCloseRequest(state.ticket, state.messages, action)) {
         finishSatisfiedRequest("The popup is closed.");
         return;
       }
-      if (shouldTreatAskAsResponse(action, step)) {
-        if (shouldRetryTaskRestatement(action.rationale)) {
+      if (shouldTreatAskAsResponse(stepHistory, action, step)) {
+        if (shouldRetryTaskRestatement(stepHistory, action.rationale)) {
           stepHistory.push(
             `Model returned a task restatement as ask: "${action.rationale}". Do not ask the user; provide the actual user-facing answer now with kind="respond".`,
           );
@@ -439,7 +347,7 @@ async function proposeNext() {
     // confirmation step.
     if (action.kind === "searchHistory") {
       const query = action.value ?? "";
-      const results = await searchHistory(query);
+      const results = await searchHistory(query, settings.useHistory);
       pushMsg("agent", `Looked up history for "${query}".`);
       stepHistory.push(
         results
@@ -471,134 +379,6 @@ async function proposeNext() {
     }
   } catch (e) {
     setError(e);
-  }
-}
-
-function compact(s: string, max = 600): string {
-  const text = s.replace(/\s+/g, " ").trim();
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
-
-function actionSignature(a: AgentAction): string {
-  return `${a.kind}|ref=${a.ref ?? ""}|value=${a.value ?? ""}|url=${a.url ?? ""}`;
-}
-
-function countCompletedActions(kind: AgentAction["kind"]): number {
-  return stepHistory.filter((line) => line.includes(`ACTION: ${kind}|`)).length;
-}
-
-function hasMeaningfulExtract(a: AgentAction): boolean {
-  const marker = `ACTION: ${actionSignature(a)}`;
-  return stepHistory.some(
-    (line) =>
-      line.includes("ACTION: extract|") &&
-      line.includes("EXTRACTED TEXT:") &&
-      (line.includes(marker) || line.length > 1000),
-  );
-}
-
-function hasExtractedText(): boolean {
-  return stepHistory.some((line) => line.includes("EXTRACTED TEXT:"));
-}
-
-function looksLikeQuestion(text: string): boolean {
-  return /[?？؟]\s*$/.test(text.trim());
-}
-
-function isReportingStep(step: PlanStep): boolean {
-  return /summari|summary|summar|саммари|резюм|обобщ|explain|ответ|report|translate|перев/i.test(
-    `${step.title} ${step.detail}`,
-  );
-}
-
-function shouldTreatAskAsResponse(action: AgentAction, step: PlanStep): boolean {
-  return !looksLikeQuestion(action.rationale) && (hasExtractedText() || isReportingStep(step));
-}
-
-function isCloseOrDismissTicket(ticket: string | null): boolean {
-  return /(?:\b(?:close|dismiss|hide)\b|закро[йи]|закрыть|скро[йи]|убери|убрать)/i.test(
-    ticket ?? "",
-  );
-}
-
-function saysTargetIsAlreadyGone(text: string): boolean {
-  return /(?:no|not|none|nothing|нет|не)\s+(?:open|visible|present|found|открыт|видим|найден)|(?:already|уже)\s+(?:closed|gone|dismissed|закрыт|закрыто|нет)|(?:нет|no)\s+(?:popup|pop-up|modal|dialog|попап|модал|окн)/i.test(
-    text,
-  );
-}
-
-function hasSuccessfulCloseAction(): boolean {
-  return state.messages.some(
-    (m) =>
-      m.role === "agent" &&
-      /^(?:Click|Select|Type|Navigate|Scroll|Wait|Extract)\b/i.test(m.text) &&
-      /(?:close|dismiss|hide|закро|закры|скро|убер|popup|pop-up|modal|dialog|попап|модал)/i.test(
-        m.text,
-      ),
-  );
-}
-
-function shouldFinishSatisfiedCloseRequest(action: AgentAction): boolean {
-  return (
-    isCloseOrDismissTicket(state.ticket) &&
-    hasSuccessfulCloseAction() &&
-    saysTargetIsAlreadyGone(action.rationale)
-  );
-}
-
-function shouldRetryTaskRestatement(text: string): boolean {
-  if (stepHistory.some((line) => line.includes("Model returned a task restatement as ask:"))) {
-    return false;
-  }
-  const t = text.trim();
-  return (
-    t.length < 180 &&
-    /^(provide|create|write|summari[sz]e|make|сделай|создай|напиши|предоставить|подготовь|резюмируй|суммари|саммари)(?:\s|$|[.,:;])/i.test(
-      t,
-    )
-  );
-}
-
-function elementLabel(ctx: PageContext | undefined, ref: string | undefined): string {
-  if (!ctx || !ref) return "element";
-  const el = ctx.elements.find((e) => e.ref === ref);
-  if (!el) return "element";
-
-  const label = compact(el.label || el.placeholder || el.value || "", 80);
-  const kind = el.role || el.tag;
-  if (label) return `"${label}" ${kind}`;
-  return el.visible ? `${kind} element` : `offscreen ${kind} element`;
-}
-
-function scrollLabel(a: AgentAction, ctx: PageContext | undefined): string {
-  if (/down|bottom|rest|more|below|further/i.test(a.rationale)) {
-    return "Scroll down";
-  }
-  return `Scroll to ${elementLabel(ctx, a.ref)}`;
-}
-
-function describe(a: AgentAction, ctx?: PageContext): string {
-  switch (a.kind) {
-    case "click":
-      return `Click ${elementLabel(ctx, a.ref)} — ${a.rationale}`;
-    case "type":
-      return `Type "${a.value ?? ""}" — ${a.rationale}`;
-    case "select":
-      return `Select "${a.value ?? ""}" — ${a.rationale}`;
-    case "scrollTo":
-      return `${scrollLabel(a, ctx)} — ${a.rationale}`;
-    case "navigate":
-      return `Navigate to ${a.url} — ${a.rationale}`;
-    case "extract":
-      return `Extract page content — ${a.rationale}`;
-    case "waitFor":
-      return `Wait — ${a.rationale}`;
-    case "searchHistory":
-      return `Search history for "${a.value ?? ""}" — ${a.rationale}`;
-    case "respond":
-      return `Respond — ${compact(a.rationale)}`;
-    default:
-      return a.rationale;
   }
 }
 
