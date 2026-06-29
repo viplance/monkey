@@ -53,6 +53,16 @@ export interface ElementSnapshot {
   visible: boolean;
 }
 
+export interface PageDebugEntry {
+  kind: "console" | "error" | "unhandledrejection";
+  level: "log" | "info" | "warn" | "error" | "debug";
+  message: string;
+  source?: string;
+  line?: number;
+  column?: number;
+  ts: number;
+}
+
 export interface PageContext {
   url: string;
   title: string;
@@ -60,6 +70,8 @@ export interface PageContext {
   elements: ElementSnapshot[];
   /** Trimmed visible text for grounding (capped). */
   textExcerpt: string;
+  /** Recent page console/errors collected by the content script, newest last. */
+  debugEntries?: PageDebugEntry[];
 }
 
 /** Chat turn rendered in the side panel. */

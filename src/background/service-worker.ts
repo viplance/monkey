@@ -170,8 +170,12 @@ async function activeTabId(): Promise<number> {
  * value would point at a file that no longer exists.
  */
 function contentScriptFile(): string | null {
-  const cs = chrome.runtime.getManifest().content_scripts?.[0]?.js?.[0];
-  return cs ?? null;
+  const scripts = chrome.runtime.getManifest().content_scripts ?? [];
+  for (const script of scripts) {
+    const file = script.js?.find((js) => js.includes("content-script"));
+    if (file) return file;
+  }
+  return null;
 }
 
 /**

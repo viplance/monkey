@@ -16,6 +16,21 @@ import { actionTool, planTool } from "./gemini/tools";
 
 export { listModels } from "./gemini/models";
 
+function shouldIncludePageDebug(ticket: string, ctx: PageContext): boolean {
+  const asksForDebug =
+    /(?:\blogs?\b|\bconsole\b|\berrors?\b|\bdebug(?:ging)?\b|stack trace|exception|failed|broken|not working|логи|консоль|ошибк|отлад|дебаг|сломал|сломано|не работает)/i.test(
+      ticket,
+    );
+  const hasWarningsOrErrors = ctx.debugEntries?.some(
+    (entry) =>
+      entry.level === "warn" ||
+      entry.level === "error" ||
+      entry.kind === "error" ||
+      entry.kind === "unhandledrejection",
+  );
+  return asksForDebug || !!hasWarningsOrErrors;
+}
+
 export async function planTicket(
   apiKey: string,
   model: string,
@@ -30,7 +45,7 @@ export async function planTicket(
         role: "user",
         parts: [
           {
-            text: `TICKET:\n${ticket}\n\nCURRENT PAGE:\n${contextToText(ctx)}\n\nProduce the plan now.`,
+            text: `TICKET:\n${ticket}\n\nCURRENT PAGE:\n${contextToText(ctx, { includeDebug: shouldIncludePageDebug(ticket, ctx) })}\n\nProduce the plan now.`,
           },
         ],
       },
@@ -61,7 +76,7 @@ export async function nextAction(
           {
             text: `TICKET:\n${ticket}\n\nPLAN:\n${planToText(plan)}\n\nACTIVE STEP: ${activeStep.title} — ${activeStep.detail}\n\nACTIONS SO FAR THIS STEP:\n${
               history.length ? history.join("\n") : "(none)"
-            }\n\nCURRENT PAGE:\n${contextToText(ctx)}\n\nPropose the next action for the active step. If the step is complete, return kind="done". If you need information from the user, return kind="ask".`,
+            }\n\nCURRENT PAGE:\n${contextToText(ctx, { includeDebug: shouldIncludePageDebug(ticket, ctx) })}\n\nPropose the next action for the active step. If the step is complete, return kind="done". If you need information from the user, return kind="ask".`,
           },
         ],
       },

@@ -33,6 +33,12 @@ export default defineManifest({
   },
   content_scripts: [
     {
+      matches: ["<all_urls>"],
+      js: ["src/content/page-debug-main.ts"],
+      run_at: "document_start",
+      world: "MAIN",
+    },
+    {
       // Injected programmatically too, but declaring keeps it available on
       // navigation for already-open pages.
       matches: ["<all_urls>"],

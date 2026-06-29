@@ -5,6 +5,7 @@
 
 import type { ElementSnapshot, PageContext } from "../shared/types";
 import { INTERACTIVE, isVisible, labelFor } from "./dom";
+import { recentPageDebugEntries } from "./page-debug";
 import { registerRef, resetRefs } from "./refs";
 
 export function snapshot(): PageContext {
@@ -44,5 +45,13 @@ export function snapshot(): PageContext {
     .trim()
     .slice(0, 2000);
 
-  return { url: location.href, title: document.title, elements, textExcerpt };
+  const debugEntries = recentPageDebugEntries();
+
+  return {
+    url: location.href,
+    title: document.title,
+    elements,
+    textExcerpt,
+    ...(debugEntries.length ? { debugEntries } : {}),
+  };
 }

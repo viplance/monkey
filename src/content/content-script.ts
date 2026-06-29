@@ -12,7 +12,10 @@
 import type { BgToContent, ContentReply } from "../shared/types";
 import { execute } from "./actions";
 import { clearHighlight, highlight } from "./highlight";
+import { installPageDebugCollector } from "./page-debug";
 import { snapshot } from "./snapshot";
+
+installPageDebugCollector();
 
 chrome.runtime.onMessage.addListener(
   (msg: BgToContent, _sender, sendResponse: (r: ContentReply) => void) => {
