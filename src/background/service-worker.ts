@@ -31,6 +31,13 @@ let settings: Settings = { ...DEFAULT_SETTINGS };
 let stepHistory: string[] = [];
 /** Host of the page the pending action targets, for rule creation. */
 let pendingHost = "";
+/**
+ * Consecutive recoveries from a stale-ref ("element not found") failure. Bounded
+ * so a genuinely missing target eventually surfaces as an error instead of
+ * looping forever.
+ */
+let staleRetries = 0;
+const MAX_STALE_RETRIES = 3;
 
 /** Extract a bare host ("www.x.com" -> "x.com") for rule matching. */
 function hostOf(url: string): string {
@@ -307,6 +314,7 @@ async function startTicket(ticket: string) {
   state.ticket = ticket;
   state.status = "planning";
   stepHistory = [];
+  staleRetries = 0;
   pushMsg("user", ticket);
   pushMsg(
     "system",
@@ -367,7 +375,7 @@ async function proposeNext() {
       );
     }
     console.log("[GBA] asking Gemini for next action…", { url: ctx.url, model: settings.model });
-    const action = await nextAction(
+    let action = await nextAction(
       settings.apiKey,
       settings.model,
       state.ticket!,
@@ -378,7 +386,37 @@ async function proposeNext() {
     );
     console.log("[GBA] Gemini proposed:", action);
 
+    if (action.kind === "extract" && hasMeaningfulExtract(action)) {
+      pushMsg("system", "Already extracted that content — moving to the next plan step.");
+      completeActiveStep();
+      return;
+    }
+
+    if (action.kind === "scrollTo" && countCompletedActions("scrollTo") >= 3) {
+      action = {
+        kind: "extract",
+        rationale:
+          "Enough page content has been revealed; extract the loaded page content now instead of continuing to scroll.",
+      };
+    }
+
+    if (action.kind === "respond") {
+      respondAndComplete(action.rationale);
+      return;
+    }
+
     if (action.kind === "ask") {
+      if (shouldTreatAskAsResponse(action, step)) {
+        if (shouldRetryTaskRestatement(action.rationale)) {
+          stepHistory.push(
+            `Model returned a task restatement as ask: "${action.rationale}". Do not ask the user; provide the actual user-facing answer now with kind="respond".`,
+          );
+          await proposeNext();
+          return;
+        }
+        respondAndComplete(action.rationale);
+        return;
+      }
       state.status = "paused";
       pushMsg("agent", action.rationale, true);
       broadcast();
@@ -417,7 +455,7 @@ async function proposeNext() {
 
     state.pendingAction = action;
     pendingHost = hostOf(ctx.url);
-    pushMsg("agent", describe(action));
+    pushMsg("agent", describe(action, ctx));
 
     // Auto-run when global auto-execute is on, or an auto-approval rule matches
     // this action on this host (e.g. the user previously chose "always allow").
@@ -432,33 +470,114 @@ async function proposeNext() {
   }
 }
 
-function describe(a: AgentAction): string {
+function compact(s: string, max = 600): string {
+  const text = s.replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function actionSignature(a: AgentAction): string {
+  return `${a.kind}|ref=${a.ref ?? ""}|value=${a.value ?? ""}|url=${a.url ?? ""}`;
+}
+
+function countCompletedActions(kind: AgentAction["kind"]): number {
+  return stepHistory.filter((line) => line.includes(`ACTION: ${kind}|`)).length;
+}
+
+function hasMeaningfulExtract(a: AgentAction): boolean {
+  const marker = `ACTION: ${actionSignature(a)}`;
+  return stepHistory.some(
+    (line) =>
+      line.includes("ACTION: extract|") &&
+      line.includes("EXTRACTED TEXT:") &&
+      (line.includes(marker) || line.length > 1000),
+  );
+}
+
+function hasExtractedText(): boolean {
+  return stepHistory.some((line) => line.includes("EXTRACTED TEXT:"));
+}
+
+function looksLikeQuestion(text: string): boolean {
+  return /[?？؟]\s*$/.test(text.trim());
+}
+
+function isReportingStep(step: PlanStep): boolean {
+  return /summari|summary|summar|саммари|резюм|обобщ|explain|ответ|report|translate|перев/i.test(
+    `${step.title} ${step.detail}`,
+  );
+}
+
+function shouldTreatAskAsResponse(action: AgentAction, step: PlanStep): boolean {
+  return !looksLikeQuestion(action.rationale) && (hasExtractedText() || isReportingStep(step));
+}
+
+function shouldRetryTaskRestatement(text: string): boolean {
+  if (stepHistory.some((line) => line.includes("Model returned a task restatement as ask:"))) {
+    return false;
+  }
+  const t = text.trim();
+  return (
+    t.length < 180 &&
+    /^(provide|create|write|summari[sz]e|make|сделай|создай|напиши|предоставить|подготовь|резюмируй|суммари|саммари)(?:\s|$|[.,:;])/i.test(
+      t,
+    )
+  );
+}
+
+function elementLabel(ctx: PageContext | undefined, ref: string | undefined): string {
+  if (!ctx || !ref) return "element";
+  const el = ctx.elements.find((e) => e.ref === ref);
+  if (!el) return "element";
+
+  const label = compact(el.label || el.placeholder || el.value || "", 80);
+  const kind = el.role || el.tag;
+  if (label) return `"${label}" ${kind}`;
+  return el.visible ? `${kind} element` : `offscreen ${kind} element`;
+}
+
+function scrollLabel(a: AgentAction, ctx: PageContext | undefined): string {
+  if (/down|bottom|rest|more|below|further/i.test(a.rationale)) {
+    return "Scroll down";
+  }
+  return `Scroll to ${elementLabel(ctx, a.ref)}`;
+}
+
+function describe(a: AgentAction, ctx?: PageContext): string {
   switch (a.kind) {
     case "click":
-      return `Click ${a.ref ?? "element"} — ${a.rationale}`;
+      return `Click ${elementLabel(ctx, a.ref)} — ${a.rationale}`;
     case "type":
       return `Type "${a.value ?? ""}" — ${a.rationale}`;
     case "select":
       return `Select "${a.value ?? ""}" — ${a.rationale}`;
     case "scrollTo":
-      return `Scroll to ${a.ref ?? "element"} — ${a.rationale}`;
+      return `${scrollLabel(a, ctx)} — ${a.rationale}`;
     case "navigate":
       return `Navigate to ${a.url} — ${a.rationale}`;
     case "extract":
-      return `Extract from ${a.ref ?? "page"} — ${a.rationale}`;
+      return `Extract page content — ${a.rationale}`;
     case "waitFor":
       return `Wait — ${a.rationale}`;
     case "searchHistory":
       return `Search history for "${a.value ?? ""}" — ${a.rationale}`;
+    case "respond":
+      return `Respond — ${compact(a.rationale)}`;
     default:
       return a.rationale;
   }
+}
+
+function respondAndComplete(text: string) {
+  pushMsg("agent", text);
+  stepHistory.push(`✓ Responded to the user\nACTION: respond|ref=|value=|url=`);
+  completeActiveStep();
 }
 
 async function executePending() {
   const action = state.pendingAction;
   if (!action) return;
   try {
+    let extractedText: string | undefined;
     if (action.kind === "navigate" && action.url) {
       // Navigation works even from a blank/chrome:// launchpad — we're leaving
       // that page — so don't apply the automatability guard here. Just grab the
@@ -476,13 +595,42 @@ async function executePending() {
       // All other actions touch the DOM, so the page must be automatable.
       const tabId = await activeTabId();
       const reply = await toContent(tabId, { type: "EXECUTE", action });
-      if (reply.type === "EXECUTE_RESULT") {
-        if (!reply.ok) throw new Error(reply.error ?? "Action failed on the page.");
-        if (reply.extracted) pushMsg("agent", `Extracted: ${reply.extracted}`);
+      if (reply.type === "EXECUTE_RESULT" && !reply.ok) {
+        // A stale ref ("Element not found") usually means the page changed
+        // between the snapshot the model saw and this execute (SPA re-render,
+        // async load, re-injected content script). Rather than failing the run,
+        // record what happened, re-snapshot, and let the model pick a fresh ref
+        // on the next loop. This is the common cause of the agent "hanging" on
+        // multi-step forms, so we recover instead of erroring out.
+        if (++staleRetries <= MAX_STALE_RETRIES) {
+          pushMsg(
+            "system",
+            "The target moved or re-rendered — re-reading the page and retrying…",
+          );
+          stepHistory.push(
+            `Last action failed: ${reply.error ?? "element not found"}. The page changed; pick a fresh element from the new snapshot.`,
+          );
+          state.pendingAction = null;
+          broadcast();
+          await proposeNext();
+          return;
+        }
+        throw new Error(reply.error ?? "Action failed on the page.");
+      }
+      if (reply.type === "EXECUTE_RESULT" && reply.extracted) {
+        extractedText = reply.extracted;
+        pushMsg("agent", `Extracted: ${compact(reply.extracted)}`);
       }
     }
 
-    stepHistory.push(`✓ ${describe(action)}`);
+    // A successful action clears the stale-ref retry budget.
+    staleRetries = 0;
+
+    stepHistory.push(
+      extractedText
+        ? `✓ ${describe(action)}\nACTION: ${actionSignature(action)}\nEXTRACTED TEXT:\n${extractedText}`
+        : `✓ ${describe(action)}\nACTION: ${actionSignature(action)}`,
+    );
     // Clear any highlight on the current page (skip after navigation — it's a
     // fresh page with nothing highlighted, and may briefly be unscriptable).
     if (action.kind !== "navigate") {
@@ -502,6 +650,7 @@ function completeActiveStep() {
   if (idx === -1) return;
   state.plan[idx].status = "done";
   stepHistory = [];
+  staleRetries = 0;
   const next = state.plan[idx + 1];
   if (next) {
     next.status = "active";

@@ -12,6 +12,7 @@ export type ActionKind =
   | "extract"
   | "waitFor"
   | "searchHistory"
+  | "respond"
   | "done"
   | "ask";
 

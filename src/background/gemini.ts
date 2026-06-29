@@ -70,6 +70,15 @@ Your job:
 Prefer asking a question over guessing when the page is ambiguous or when an
 action is destructive (delete, purchase, submit payment).
 Be concise. Never fabricate refs that are not in the element map.
+When the user's task is to summarize, explain, translate, or otherwise report
+information from the page, use kind="respond" with the user-facing answer in
+rationale. Do not use kind="ask" to deliver an answer. Use kind="ask" only for
+true clarifying questions that require the user to reply.
+For read/summarize tasks, prefer one extract of the page/main content before
+scrolling. Do not repeatedly extract the same ref: once extracted text appears
+in the step history, use it to finish the current reading step or continue to
+the next plan step. Use scroll only when the available text is clearly missing
+the content needed for the task or the page lazily loads more content.
 
 URL resolution: when the task names a destination by name rather than URL
 (e.g. "open Jira", "go to our dashboard") and you do not know its exact URL,
@@ -120,6 +129,7 @@ const actionTool = {
           "extract",
           "waitFor",
           "searchHistory",
+          "respond",
           "done",
           "ask",
         ],
@@ -133,7 +143,8 @@ const actionTool = {
       url: { type: "string", description: "URL for navigate" },
       rationale: {
         type: "string",
-        description: "Why this action; if kind=ask, the question text",
+        description:
+          "Why this action; if kind=ask, the question text; if kind=respond, the user-facing answer",
       },
     },
     required: ["kind", "rationale"],

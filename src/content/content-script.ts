@@ -20,6 +20,27 @@ const REF_ATTR = "data-gba-ref";
 let refCounter = 0;
 const refMap = new Map<string, Element>();
 
+/**
+ * Descriptors recorded at snapshot time so a ref can be re-resolved against the
+ * live DOM even after the map is lost or the original node was re-rendered.
+ *
+ * Refs are fragile on their own: the map lives only as long as this module
+ * instance, and `data-gba-ref` attributes are wiped whenever the SPA re-mounts
+ * a node. When that happens `refMap.get(ref)` returns nothing (or a detached
+ * node) and a click fails with "Element not found". Keeping a lightweight
+ * fingerprint per ref lets us find the element again by its identifying traits.
+ */
+interface RefDescriptor {
+  tag: string;
+  role: string | null;
+  type: string | null;
+  label: string;
+  href: string | null;
+  placeholder: string | null;
+  name: string | null;
+}
+const refDescriptors = new Map<string, RefDescriptor>();
+
 const INTERACTIVE =
   'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="checkbox"], [role="radio"], [contenteditable="true"], [onclick]';
 
@@ -57,6 +78,7 @@ function labelFor(el: Element): string {
 function snapshot(): PageContext {
   // Reset refs each snapshot so they stay aligned with what the model sees.
   refMap.clear();
+  refDescriptors.clear();
   document.querySelectorAll(`[${REF_ATTR}]`).forEach((e) => e.removeAttribute(REF_ATTR));
   refCounter = 0;
 
@@ -74,6 +96,15 @@ function snapshot(): PageContext {
     refMap.set(ref, el);
 
     const input = el as HTMLInputElement;
+    refDescriptors.set(ref, {
+      tag: el.tagName.toLowerCase(),
+      role: el.getAttribute("role"),
+      type: input.type || null,
+      label,
+      href: (el as HTMLAnchorElement).href || null,
+      placeholder: input.placeholder || null,
+      name: el.getAttribute("name"),
+    });
     elements.push({
       ref,
       tag: el.tagName.toLowerCase(),
@@ -120,7 +151,7 @@ function highlight(refs: string[]) {
   ensureStyle();
   clearHighlight();
   for (const ref of refs) {
-    const el = refMap.get(ref);
+    const el = resolveRef(ref);
     if (el) {
       el.classList.add(HL_CLASS);
       el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -140,14 +171,110 @@ function fireInput(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
   el.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+function normalizedText(el: Element | HTMLElement | null | undefined): string {
+  if (!(el instanceof HTMLElement)) return "";
+  return el.innerText.replace(/\s+/g, " ").trim();
+}
+
+function bestExtractText(target: Element | null): string {
+  const candidates = [
+    target,
+    document.querySelector("main"),
+    document.querySelector('[role="main"]'),
+    document.querySelector("article"),
+    document.body,
+  ];
+
+  let best = "";
+  for (const candidate of candidates) {
+    const text = normalizedText(candidate);
+    if (text.length > best.length) best = text;
+  }
+
+  return best.slice(0, 12000);
+}
+
+/** An element still attached to the document we can act on. */
+function isUsable(el: Element | null | undefined): el is Element {
+  return !!el && el.isConnected;
+}
+
+/**
+ * Resolve a ref to a live element, tolerating a lost map or a re-rendered node.
+ *
+ * Order of attempts:
+ *  1. the in-memory map (fast path, node still attached);
+ *  2. the `data-gba-ref` attribute in the DOM (survives map loss, e.g. when the
+ *     content script was re-injected into a fresh module);
+ *  3. the recorded descriptor — match a current interactive element by its
+ *     identifying traits (tag/role/type/name/href/label). This rescues the case
+ *     where the SPA re-mounted the node and dropped our attribute.
+ */
+function resolveRef(ref: string | undefined): Element | null {
+  if (!ref) return null;
+
+  const mapped = refMap.get(ref);
+  if (isUsable(mapped)) return mapped;
+
+  const byAttr = document.querySelector(`[${REF_ATTR}="${CSS.escape(ref)}"]`);
+  if (isUsable(byAttr)) return byAttr;
+
+  const desc = refDescriptors.get(ref);
+  if (!desc) return null;
+
+  const candidates = Array.from(document.querySelectorAll(INTERACTIVE)).filter(
+    (el) => isUsable(el) && el.tagName.toLowerCase() === desc.tag,
+  );
+  // Score each candidate by how many identifying traits it shares with the
+  // descriptor; the best non-zero match wins. Label match is weighted highest
+  // because it's the most semantically meaningful.
+  let best: Element | null = null;
+  let bestScore = 0;
+  for (const el of candidates) {
+    const input = el as HTMLInputElement;
+    let score = 0;
+    if (desc.label && labelFor(el) === desc.label) score += 4;
+    if (desc.role && el.getAttribute("role") === desc.role) score += 1;
+    if (desc.type && (input.type || null) === desc.type) score += 1;
+    if (desc.name && el.getAttribute("name") === desc.name) score += 2;
+    if (desc.href && (el as HTMLAnchorElement).href === desc.href) score += 2;
+    if (desc.placeholder && (input.placeholder || null) === desc.placeholder) score += 2;
+    if (score > bestScore) {
+      best = el;
+      bestScore = score;
+    }
+  }
+  if (best && bestScore > 0) {
+    // Re-bind so subsequent actions on this ref hit the same node.
+    refMap.set(ref, best);
+    return best;
+  }
+  return null;
+}
+
+/**
+ * Click that works on SPA widgets which ignore a bare `.click()`. Some
+ * frameworks only react to a full pointer/mouse event sequence (e.g. custom
+ * dropdowns, DHL's wizard buttons). We dispatch that sequence and also call
+ * native `.click()` so plain links/buttons still fire exactly once.
+ */
+function robustClick(el: HTMLElement) {
+  const opts = { bubbles: true, cancelable: true, view: window } as const;
+  el.dispatchEvent(new PointerEvent("pointerdown", opts));
+  el.dispatchEvent(new MouseEvent("mousedown", opts));
+  el.dispatchEvent(new PointerEvent("pointerup", opts));
+  el.dispatchEvent(new MouseEvent("mouseup", opts));
+  el.click();
+}
+
 function execute(action: AgentAction): ContentReply {
-  const el = action.ref ? refMap.get(action.ref) : null;
+  const el = resolveRef(action.ref);
 
   switch (action.kind) {
     case "click": {
       if (!(el instanceof HTMLElement)) return fail("Element not found for click.");
       el.scrollIntoView({ block: "center" });
-      el.click();
+      robustClick(el);
       return { type: "EXECUTE_RESULT", ok: true };
     }
     case "type": {
@@ -185,9 +312,7 @@ function execute(action: AgentAction): ContentReply {
       return fail("Element not found to scroll to.");
     }
     case "extract": {
-      const text = el instanceof HTMLElement
-        ? el.innerText.trim().slice(0, 500)
-        : (document.body?.innerText ?? "").trim().slice(0, 500);
+      const text = bestExtractText(el);
       return { type: "EXECUTE_RESULT", ok: true, extracted: text };
     }
     default:
