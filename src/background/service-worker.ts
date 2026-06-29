@@ -164,10 +164,36 @@ async function activeTabId(): Promise<number> {
   return tab.id;
 }
 
-/** Resolve the built content script path from the manifest (hashed by Vite). */
+/**
+ * Resolve the built content script path from the *live* manifest (hashed by
+ * Vite). Read fresh every time: the hash changes on each rebuild, and a stale
+ * value would point at a file that no longer exists.
+ */
 function contentScriptFile(): string | null {
   const cs = chrome.runtime.getManifest().content_scripts?.[0]?.js?.[0];
   return cs ?? null;
+}
+
+/**
+ * Inject the built content script into a tab, turning the framework's opaque
+ * "Could not load file: 'assets/…js'" into an actionable message. That error
+ * means the running extension references a hashed asset that no longer exists on
+ * disk — i.e. the code was rebuilt but the extension wasn't reloaded.
+ */
+async function injectContentScript(tabId: number): Promise<void> {
+  const file = contentScriptFile();
+  if (!file) throw new Error("Content script unavailable.");
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: [file] });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/could not load file/i.test(msg)) {
+      throw new Error(
+        "Extension is out of date — reload it at chrome://extensions (the page was built after this version loaded), then try again.",
+      );
+    }
+    throw e;
+  }
 }
 
 /** Send a message to the content script, injecting it first if needed. */
@@ -177,9 +203,7 @@ async function toContent(tabId: number, msg: BgToContent): Promise<ContentReply>
   } catch {
     // Content script not present (e.g. page loaded before install) — inject the
     // built (hashed) file referenced by the manifest, then retry.
-    const file = contentScriptFile();
-    if (!file) throw new Error("Content script unavailable.");
-    await chrome.scripting.executeScript({ target: { tabId }, files: [file] });
+    await injectContentScript(tabId);
     return await chrome.tabs.sendMessage(tabId, msg);
   }
 }
