@@ -444,7 +444,7 @@ async function proposeNext(flow = flowId) {
 
     state.pendingAction = action;
     pendingHost = hostOf(ctx.url);
-    pushMsg("agent", describe(action, ctx));
+    pushMsg("agent", describe(action));
 
     // Auto-run when global auto-execute is on, or an auto-approval rule matches
     // this action on this host (e.g. the user previously chose "always allow").

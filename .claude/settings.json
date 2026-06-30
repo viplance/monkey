@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -rn \"logStep\\\\|step.*—\\\\|\\\\` — \\\\`\\\\|stepText\\\\|formatStep\\\\|describeAction\\\\|actionLabel\" /Users/dzmitrysharko/Projects/monkey/src --include=\"*.ts\" --include=\"*.tsx\")"
+    ]
+  }
+}
