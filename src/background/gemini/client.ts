@@ -18,9 +18,13 @@ export async function call(
   contents: GeminiContent[],
   tool: GeminiTool,
   toolName: string,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   // Abort a hung request rather than leaving the agent stuck on "working…".
   const ctrl = new AbortController();
+  const abortFromCaller = () => ctrl.abort();
+  if (signal?.aborted) abortFromCaller();
+  signal?.addEventListener("abort", abortFromCaller, { once: true });
   const timeout = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
   let res: Response;
   try {
@@ -43,11 +47,15 @@ export async function call(
     );
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") {
+      if (signal?.aborted) {
+        throw new Error("Gemini request canceled.");
+      }
       throw new Error(`Gemini request timed out after 30s (model "${model}"). Check your key/model and network.`);
     }
     throw new Error(`Gemini request failed: ${e instanceof Error ? e.message : String(e)}`);
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener("abort", abortFromCaller);
   }
 
   if (!res.ok) {

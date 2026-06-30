@@ -36,6 +36,7 @@ export async function planTicket(
   model: string,
   ticket: string,
   ctx: PageContext,
+  signal?: AbortSignal,
 ): Promise<Array<Pick<PlanStep, "title" | "detail">>> {
   const args = await call(
     apiKey,
@@ -52,6 +53,7 @@ export async function planTicket(
     ],
     planTool,
     "propose_plan",
+    signal,
   );
   const steps = (args.steps as Array<{ title: string; detail: string }>) ?? [];
   return steps.map((s) => ({ title: s.title, detail: s.detail }));
@@ -65,6 +67,7 @@ export async function nextAction(
   activeStep: PlanStep,
   ctx: PageContext,
   history: string[],
+  signal?: AbortSignal,
 ): Promise<AgentAction> {
   const args = await call(
     apiKey,
@@ -83,6 +86,7 @@ export async function nextAction(
     ],
     actionTool,
     "propose_action",
+    signal,
   );
 
   return {
