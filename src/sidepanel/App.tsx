@@ -55,7 +55,15 @@ export function App() {
 
   useEffect(() => {
     if (showSettings) return;
-    requestAnimationFrame(() => inputRef.current?.focus());
+    const focusInput = () => inputRef.current?.focus({ preventScroll: true });
+    const frameId = requestAnimationFrame(focusInput);
+    const timeoutId = window.setTimeout(focusInput, 100);
+    window.addEventListener("focus", focusInput);
+    return () => {
+      cancelAnimationFrame(frameId);
+      window.clearTimeout(timeoutId);
+      window.removeEventListener("focus", focusInput);
+    };
   }, [showSettings]);
 
   // Track whether the active tab can be automated, so we can disable Go on
@@ -247,6 +255,7 @@ export function App() {
       <div className="composer">
         <textarea
           ref={inputRef}
+          autoFocus
           rows={2}
           placeholder={
             awaitingAnswer

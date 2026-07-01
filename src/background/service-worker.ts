@@ -54,6 +54,26 @@ let pendingHost = "";
  */
 let staleRetries = 0;
 const MAX_STALE_RETRIES = 3;
+/**
+ * Circuit breaker against runaway loops. `stepCount` bounds the total number of
+ * actions the model may take in a single run — a hard ceiling so no failure mode
+ * can spin forever. `repeatSignature`/`repeatCount` catch the tighter loop where
+ * the model keeps proposing the *same* action (e.g. re-navigating to an
+ * unreachable URL): the page never changes, so the model never makes progress.
+ */
+let stepCount = 0;
+const MAX_STEPS = 40;
+let repeatSignature = "";
+let repeatCount = 0;
+const MAX_REPEATS = 3;
+
+/** Reset the run-level circuit breaker. Call whenever a fresh run begins. */
+function resetFuse() {
+  staleRetries = 0;
+  stepCount = 0;
+  repeatSignature = "";
+  repeatCount = 0;
+}
 
 /** Create + persist an auto-rule from an approved action. */
 async function addRuleFromAction(action: AgentAction, scope: "site" | "any") {
@@ -286,7 +306,7 @@ async function startTicket(ticket: string) {
   state.ticket = ticket;
   state.status = "planning";
   stepHistory = [];
-  staleRetries = 0;
+  resetFuse();
   pushMsg("user", ticket);
   pushMsg(
     "system",
@@ -332,6 +352,14 @@ async function proposeNext(flow = flowId) {
     finish();
     return;
   }
+  // Circuit breaker: hard ceiling on total actions per run. Guarantees the loop
+  // terminates even if every other safeguard is bypassed.
+  if (++stepCount > MAX_STEPS) {
+    setError(
+      `Stopped after ${MAX_STEPS} actions without finishing — the task may be stuck (e.g. a page that won't load). Refine the request or check the site, then start again.`,
+    );
+    return;
+  }
   state.status = "running";
   state.pendingAction = null;
   broadcast();
@@ -369,6 +397,30 @@ async function proposeNext(flow = flowId) {
     );
     if (!isCurrentFlow(flow)) return;
     console.log("[GBA] Gemini proposed:", action);
+
+    // Circuit breaker: catch the tight loop where the model keeps proposing the
+    // *same* side-effecting action (e.g. re-navigating to an unreachable URL).
+    // The page never changes, so this never makes progress — bail out instead of
+    // spinning. Terminal/internal actions (respond/ask/done/searchHistory) are
+    // exempt: they either end the run or don't touch the page.
+    const REPEATABLE: AgentAction["kind"][] = [
+      "navigate", "click", "type", "select", "scrollTo", "waitFor", "extract",
+    ];
+    if (REPEATABLE.includes(action.kind)) {
+      const sig = actionSignature(action);
+      if (sig === repeatSignature) {
+        if (++repeatCount >= MAX_REPEATS) {
+          setError(
+            `Stopped: the same action repeated ${MAX_REPEATS} times without making progress (${describe(action)}). ` +
+              "The page may be unreachable or not responding. Check the site, then start again.",
+          );
+          return;
+        }
+      } else {
+        repeatSignature = sig;
+        repeatCount = 1;
+      }
+    }
 
     if (action.kind === "extract" && hasMeaningfulExtract(stepHistory, action)) {
       pushMsg("system", "Already extracted that content — moving to the next plan step.");
@@ -490,8 +542,22 @@ async function executePending(flow = flowId) {
       const tab = await activeTab();
       if (!isCurrentFlow(flow)) return;
       await chrome.tabs.update(tab.id, { url: action.url });
-      await waitForTabLoad(tab.id);
+      const loaded = await waitForTabLoad(tab.id);
       if (!isCurrentFlow(flow)) return;
+      if (!loaded) {
+        // The tab never reached a real, loaded http(s) page within the timeout —
+        // the site is down, unreachable, or stuck. Record it and let the loop
+        // continue: the model sees the failure in history and the repeat/step
+        // fuses stop it if it keeps retrying a dead URL.
+        pushMsg("system", `Couldn't load ${action.url} — the page didn't finish loading.`);
+        stepHistory.push(
+          `Navigation to ${action.url} failed: the page did not load (site may be down or unreachable). Do not retry the same URL; try a different approach or report that the site is unavailable.`,
+        );
+        broadcast();
+        state.pendingAction = null;
+        await proposeNext(flow);
+        return;
+      }
       pushMsg("system", "Page loaded. Reading it…");
       broadcast();
     } else if (action.kind === "waitFor") {
@@ -562,7 +628,12 @@ function completeActiveStep(flow = flowId) {
   if (idx === -1) return;
   state.plan[idx].status = "done";
   stepHistory = [];
+  // A completed step is real progress: reset the per-run repeat/stale counters
+  // so the next step starts with a full budget. Keep `stepCount` — it's the
+  // whole-run ceiling.
   staleRetries = 0;
+  repeatSignature = "";
+  repeatCount = 0;
   const next = state.plan[idx + 1];
   if (next) {
     next.status = "active";
@@ -587,23 +658,23 @@ function finish() {
  * events while the URL is still chrome:// — acting then throws "Cannot access a
  * chrome:// URL", so we must confirm the URL left the blocked scheme.
  */
-function waitForTabLoad(tabId: number): Promise<void> {
+function waitForTabLoad(tabId: number): Promise<boolean> {
   return new Promise((resolve) => {
     let done = false;
-    const finish = () => {
+    const finish = (ok: boolean) => {
       if (done) return;
       done = true;
       chrome.tabs.onUpdated.removeListener(listener);
       clearInterval(poll);
       clearTimeout(timer);
-      resolve();
+      resolve(ok);
     };
     const ready = (url?: string, status?: string) =>
       status === "complete" && !!url && /^https?:\/\//.test(url) &&
       classifyUrl(url) === "ok";
 
     const listener = (id: number, info: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => {
-      if (id === tabId && ready(tab.url, info.status ?? tab.status)) finish();
+      if (id === tabId && ready(tab.url, info.status ?? tab.status)) finish(true);
     };
     chrome.tabs.onUpdated.addListener(listener);
 
@@ -612,13 +683,16 @@ function waitForTabLoad(tabId: number): Promise<void> {
     const poll = setInterval(async () => {
       try {
         const t = await chrome.tabs.get(tabId);
-        if (ready(t.url, t.status)) finish();
+        if (ready(t.url, t.status)) finish(true);
       } catch {
         /* tab gone */
       }
     }, 300);
 
-    const timer = setTimeout(finish, 20000);
+    // Timed out: the page never committed to a loaded http(s) page. Resolve
+    // `false` so the caller can surface an "unreachable" message instead of
+    // pretending the page loaded and looping.
+    const timer = setTimeout(() => finish(false), 20000);
   });
 }
 
@@ -708,7 +782,7 @@ chrome.runtime.onMessage.addListener((msg: PanelToBg, _sender, sendResponse) => 
         cancelFlow();
         state = freshState();
         stepHistory = [];
-        staleRetries = 0;
+        resetFuse();
         pendingHost = "";
         broadcast();
         sendResponse({ ok: true });

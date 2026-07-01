@@ -1,5 +1,4 @@
 const MONKEY_DEBUG_CHANNEL = "__monkey_page_debug__";
-const MONKEY_DEBUG_LEVELS = ["debug", "log", "info", "warn", "error"] as const;
 
 declare global {
   interface Window {
@@ -30,19 +29,6 @@ function emitDebug(payload: Record<string, unknown>) {
 
 if (!window.__monkeyPageDebugInstalled) {
   window.__monkeyPageDebugInstalled = true;
-
-  for (const level of MONKEY_DEBUG_LEVELS) {
-    const original = console[level];
-    if (typeof original !== "function") continue;
-    console[level] = function patchedConsole(...args: unknown[]) {
-      emitDebug({
-        kind: "console",
-        level,
-        message: args.map(compactDebugValue).join(" "),
-      });
-      return original.apply(this, args);
-    };
-  }
 
   window.addEventListener("error", (event) => {
     emitDebug({

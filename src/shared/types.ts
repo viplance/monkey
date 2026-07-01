@@ -70,7 +70,7 @@ export interface PageContext {
   elements: ElementSnapshot[];
   /** Trimmed visible text for grounding (capped). */
   textExcerpt: string;
-  /** Recent page console/errors collected by the content script, newest last. */
+  /** Recent page errors collected by the content script, newest last. */
   debugEntries?: PageDebugEntry[];
 }
 

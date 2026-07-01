@@ -17,7 +17,7 @@ function debugEntriesToText(ctx: PageContext, options: ContextToTextOptions): st
         : "";
     return `- ${entry.kind}/${entry.level} ${ageSeconds}s ago${where}: ${entry.message}`;
   });
-  return `\n\nRECENT PAGE DEBUG (console/errors, newest last):\n${lines.join("\n")}`;
+  return `\n\nRECENT PAGE DEBUG (page errors, newest last):\n${lines.join("\n")}`;
 }
 
 /** Render a page context into the compact text grounding the model sees. */

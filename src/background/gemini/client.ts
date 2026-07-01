@@ -5,7 +5,7 @@ import type { GeminiContent, GeminiPart, GeminiTool } from "./types";
 
 export const BASE = "https://generativelanguage.googleapis.com/v1beta";
 
-const REQUEST_TIMEOUT_MS = 30000;
+const REQUEST_TIMEOUT_MS = 60000;
 
 /**
  * Call generateContent forcing a single function call, and return the parsed
@@ -50,7 +50,7 @@ export async function call(
       if (signal?.aborted) {
         throw new Error("Gemini request canceled.");
       }
-      throw new Error(`Gemini request timed out after 30s (model "${model}"). Check your key/model and network.`);
+      throw new Error(`Gemini request timed out after ${REQUEST_TIMEOUT_MS / 1000}s (model "${model}"). Check your key/model and network.`);
     }
     throw new Error(`Gemini request failed: ${e instanceof Error ? e.message : String(e)}`);
   } finally {
