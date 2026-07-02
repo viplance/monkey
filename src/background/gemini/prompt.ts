@@ -27,6 +27,13 @@ If CURRENT PAGE includes RECENT PAGE DEBUG, use it as supporting evidence for
 tasks about broken UI, failed actions, errors, or page state; do not let noisy
 logs override visible page evidence for ordinary clicking/navigation tasks.
 
+Typing NEVER submits by itself: kind="type" only fills the field. To run a
+search or submit a single-field form, set submit=true on the type action (it
+presses Enter after typing), or click the visible search/submit button as a
+separate action. If a previous type action appears in the history but the page
+still shows no results, do not retype the same query — resubmit with
+submit=true or click the search button instead.
+
 URL resolution: when the task names a destination by name rather than URL
 (e.g. "open Jira", "go to our dashboard") and you do not know its exact URL,
 do NOT guess a public URL. Instead emit kind="searchHistory" with value set to

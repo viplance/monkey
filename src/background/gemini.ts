@@ -93,6 +93,7 @@ export async function nextAction(
     kind: args.kind as AgentAction["kind"],
     ref: args.ref as string | undefined,
     value: args.value as string | undefined,
+    submit: args.submit === true || undefined,
     url: args.url as string | undefined,
     rationale: (args.rationale as string) ?? "",
   };

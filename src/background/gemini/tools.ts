@@ -53,6 +53,11 @@ export const actionTool: GeminiTool = {
         description:
           "Text to type / option / question / history search term (kind=searchHistory)",
       },
+      submit: {
+        type: "boolean",
+        description:
+          "kind=type only: press Enter after typing to submit (search boxes, single-field forms). Typing without submit=true only fills the field and never runs a search.",
+      },
       url: { type: "string", description: "URL for navigate" },
       rationale: {
         type: "string",

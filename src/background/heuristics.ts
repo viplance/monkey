@@ -13,7 +13,7 @@ export function compact(s: string, max = 600): string {
 }
 
 export function actionSignature(a: AgentAction): string {
-  return `${a.kind}|ref=${a.ref ?? ""}|value=${a.value ?? ""}|url=${a.url ?? ""}`;
+  return `${a.kind}|ref=${a.ref ?? ""}|value=${a.value ?? ""}|url=${a.url ?? ""}${a.submit ? "|submit" : ""}`;
 }
 
 export function countCompletedActions(

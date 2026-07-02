@@ -23,6 +23,12 @@ export interface AgentAction {
   ref?: string;
   /** Text to type (kind="type") or option label/value (kind="select"). */
   value?: string;
+  /**
+   * kind="type" only: press Enter after typing (and submit the enclosing form
+   * if the page doesn't handle the key itself). Needed for search boxes —
+   * typing alone never runs the search.
+   */
+  submit?: boolean;
   /** URL for kind="navigate". */
   url?: string;
   /** Human-readable reason shown to the user before confirming. */

@@ -14,6 +14,33 @@ function fireInput(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
   el.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+/**
+ * "Press Enter" in a field. SPAs typically handle the Enter keydown themselves
+ * (and call preventDefault), while classic sites rely on native form
+ * submission. Dispatch the full key sequence first, and only fall back to
+ * submitting the enclosing form when the page did not consume the keydown —
+ * otherwise a search could fire twice. `keyCode`/`which` are defined manually
+ * because the KeyboardEvent constructor ignores them, yet many sites still
+ * check `e.keyCode === 13`.
+ */
+function pressEnter(el: HTMLInputElement | HTMLTextAreaElement) {
+  const enterEvent = (type: string) => {
+    const e = new KeyboardEvent(type, {
+      key: "Enter",
+      code: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(e, "keyCode", { get: () => 13 });
+    Object.defineProperty(e, "which", { get: () => 13 });
+    return e;
+  };
+  const unconsumed = el.dispatchEvent(enterEvent("keydown"));
+  el.dispatchEvent(enterEvent("keypress"));
+  el.dispatchEvent(enterEvent("keyup"));
+  if (unconsumed) el.form?.requestSubmit();
+}
+
 function bestExtractText(target: Element | null): string {
   const candidates = [
     target,
@@ -65,6 +92,7 @@ export function execute(action: AgentAction): ContentReply {
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
         el.focus();
         fireInput(el, action.value ?? "");
+        if (action.submit) pressEnter(el);
         return { type: "EXECUTE_RESULT", ok: true };
       }
       if (el instanceof HTMLElement && el.isContentEditable) {

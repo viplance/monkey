@@ -758,6 +758,13 @@ async function executePending(flow = flowId) {
         extractedText = reply.extracted;
         pushMsg("agent", `Extracted: ${compact(reply.extracted)}`);
       }
+      // A type-with-submit (pressed Enter) may kick off a full navigation
+      // (classic search forms) or an in-page SPA update. Wait for it to settle
+      // so the next snapshot reads the results page, not the one we just left.
+      if (action.kind === "type" && action.submit) {
+        await settleAfterSubmit(tabId);
+        if (!isCurrentFlow(flow)) return;
+      }
     }
 
     // A successful action clears the stale-ref retry budget.
@@ -826,6 +833,23 @@ function finish() {
   workTabId = null; // Run is over — release the pinned tab.
   pushMsg("agent", "✅ All steps complete.");
   broadcast();
+}
+
+/**
+ * After Enter was pressed in a field, watch the tab briefly: if a navigation
+ * started, wait for it to finish; if nothing starts within ~1.5s, assume the
+ * update was in-page (SPA) and return so the loop can re-snapshot.
+ */
+async function settleAfterSubmit(tabId: number): Promise<void> {
+  for (let i = 0; i < 6; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) return;
+    if (tab.status === "loading") {
+      await waitForTabLoad(tabId);
+      return;
+    }
+  }
 }
 
 /**
