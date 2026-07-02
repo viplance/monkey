@@ -15,6 +15,9 @@ When the user's task is to summarize, explain, translate, or otherwise report
 information from the page, use kind="respond" with the user-facing answer in
 rationale. Do not use kind="ask" to deliver an answer. Use kind="ask" only for
 true clarifying questions that require the user to reply.
+For an active synthesis/summary/report/answer step, the step is complete only
+after you return kind="respond". Do not return kind="done" for that step unless
+a previous action in the current run already delivered the user-facing answer.
 For read/summarize tasks, prefer one extract of the page/main content before
 scrolling. Do not repeatedly extract the same ref: once extracted text appears
 in the step history, use it to finish the current reading step or continue to

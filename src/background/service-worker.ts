@@ -28,6 +28,8 @@ import {
   compact,
   countCompletedActions,
   hasMeaningfulExtract,
+  isReportTicket,
+  isReportingStep,
   shouldFinishSatisfiedCloseRequest,
   shouldRetryTaskRestatement,
   shouldTreatAskAsResponse,
@@ -45,8 +47,17 @@ let flowId = 0;
 let activeGeminiAbort: AbortController | null = null;
 /** Per-step running log of action descriptions, fed back to the model. */
 let stepHistory: string[] = [];
+/** Cross-step memory for extracted/read content needed by final report steps. */
+let runHistory: string[] = [];
 /** Host of the page the pending action targets, for rule creation. */
 let pendingHost = "";
+/**
+ * The tab a run is pinned to. Set when a ticket starts and used for every action
+ * thereafter, so the agent keeps working in *that* tab even if the user switches
+ * to a different one. `null` when no run owns a tab. If this tab is closed
+ * mid-run we abort with an error (see the onRemoved listener below).
+ */
+let workTabId: number | null = null;
 /**
  * Consecutive recoveries from a stale-ref ("element not found") failure. Bounded
  * so a genuinely missing target eventually surfaces as an error instead of
@@ -66,6 +77,10 @@ const MAX_STEPS = 40;
 let repeatSignature = "";
 let repeatCount = 0;
 const MAX_REPEATS = 3;
+const MAX_RUN_HISTORY_CHARS = 60000;
+const MAX_FINAL_REPORT_RETRIES = 2;
+let finalReportRetries = 0;
+let deliveredResponse = false;
 
 /** Reset the run-level circuit breaker. Call whenever a fresh run begins. */
 function resetFuse() {
@@ -73,6 +88,44 @@ function resetFuse() {
   stepCount = 0;
   repeatSignature = "";
   repeatCount = 0;
+  finalReportRetries = 0;
+  deliveredResponse = false;
+}
+
+function combinedHistory(): string[] {
+  return runHistory.length
+    ? [
+        "PREVIOUS COMPLETED STEPS / EXTRACTED MATERIALS:",
+        ...runHistory,
+        "CURRENT STEP HISTORY:",
+        ...stepHistory,
+      ]
+    : stepHistory;
+}
+
+function rememberCompletedStep(entries: string[]) {
+  const useful = entries.filter(
+    (entry) =>
+      entry.includes("EXTRACTED TEXT:") ||
+      entry.includes("History matches") ||
+      entry.includes("Navigation to "),
+  );
+  if (!useful.length) return;
+
+  runHistory.push(...useful);
+  let total = runHistory.join("\n\n").length;
+  while (total > MAX_RUN_HISTORY_CHARS && runHistory.length > 1) {
+    runHistory.shift();
+    total = runHistory.join("\n\n").length;
+  }
+}
+
+function needsFinalReport(step: PlanStep): boolean {
+  return (
+    isReportTicket(state.ticket) &&
+    (isReportingStep(step) || state.plan[state.plan.length - 1]?.id === step.id) &&
+    !deliveredResponse
+  );
 }
 
 /** Create + persist an auto-rule from an approved action. */
@@ -199,6 +252,17 @@ async function ensureSettings(): Promise<Settings> {
 // --- tab / content helpers ------------------------------------------------
 
 async function activeTab(): Promise<{ id: number; kind: TabKind; url: string }> {
+  // Once a run is pinned to a tab, keep operating on *that* tab even if the user
+  // switches away — otherwise the agent would start acting on whatever tab the
+  // user happened to move to. Before a run starts (workTabId === null) fall back
+  // to the current active tab so START/GET_TAB_STATUS pick the tab in view.
+  if (workTabId !== null) {
+    const tab = await chrome.tabs.get(workTabId).catch(() => null);
+    if (!tab?.id) {
+      throw new NotAutomatableError("User closed the active tab.");
+    }
+    return { id: tab.id, kind: classifyUrl(tab.url), url: tab.url ?? "" };
+  }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) {
     throw new NotAutomatableError("No active tab — open a normal web page to start.");
@@ -276,6 +340,9 @@ async function snapshotTab(tabId: number): Promise<PageContext> {
 
 async function startTicket(ticket: string) {
   const flow = beginFlow();
+  // Fresh run: unpin any previous tab so activeTab() picks the tab currently in
+  // view for planning. It gets re-pinned below once we've validated it.
+  workTabId = null;
   // Read fresh from storage — the worker may have restarted since the key was
   // saved, wiping the in-memory copy.
   await ensureSettings();
@@ -302,10 +369,16 @@ async function startTicket(ticket: string) {
     return;
   }
 
+  // Pin the run to this tab. From here on activeTab() resolves to it, so
+  // switching tabs no longer redirects the agent to the wrong page, and closing
+  // it aborts the run (see the onRemoved listener).
+  workTabId = tab.id;
+
   state = freshState();
   state.ticket = ticket;
   state.status = "planning";
   stepHistory = [];
+  runHistory = [];
   resetFuse();
   pushMsg("user", ticket);
   pushMsg(
@@ -391,7 +464,7 @@ async function proposeNext(flow = flowId) {
         state.plan,
         step,
         ctx,
-        stepHistory,
+        combinedHistory(),
         signal,
       ),
     );
@@ -423,6 +496,19 @@ async function proposeNext(flow = flowId) {
     }
 
     if (action.kind === "extract" && hasMeaningfulExtract(stepHistory, action)) {
+      if (needsFinalReport(step)) {
+        if (++finalReportRetries > MAX_FINAL_REPORT_RETRIES) {
+          setError(
+            "The agent reached the final reporting step but kept trying to read instead of producing the requested answer.",
+          );
+          return;
+        }
+        stepHistory.push(
+          `Model tried to extract again during "${step.title}", but this is a final answer/report step. Do not read more unless critical content is missing; use the extracted materials above and return kind="respond" with the concise user-facing report.`,
+        );
+        await proposeNext(flow);
+        return;
+      }
       pushMsg("system", "Already extracted that content — moving to the next plan step.");
       completeActiveStep();
       return;
@@ -464,6 +550,19 @@ async function proposeNext(flow = flowId) {
     }
 
     if (action.kind === "done") {
+      if (needsFinalReport(step)) {
+        if (++finalReportRetries > MAX_FINAL_REPORT_RETRIES) {
+          setError(
+            "The agent reached the final reporting step without producing the requested answer. Please retry; the collected page text was preserved during this run but the model still returned done.",
+          );
+          return;
+        }
+        stepHistory.push(
+          `Model tried to finish "${step.title}" with kind="done", but the original ticket asks for a final answer/report. Use the extracted materials above and return kind="respond" with the complete user-facing report.`,
+        );
+        await proposeNext(flow);
+        return;
+      }
       pushMsg("agent", `Step done: ${step.title}`);
       completeActiveStep();
       return;
@@ -514,6 +613,7 @@ async function proposeNext(flow = flowId) {
 
 function respondAndComplete(text: string) {
   pushMsg("agent", text);
+  deliveredResponse = true;
   stepHistory.push(`✓ Responded to the user\nACTION: respond|ref=|value=|url=`);
   completeActiveStep();
 }
@@ -626,6 +726,7 @@ function completeActiveStep(flow = flowId) {
   if (!isCurrentFlow(flow)) return;
   const idx = state.plan.findIndex((s) => s.id === state.activeStepId);
   if (idx === -1) return;
+  rememberCompletedStep(stepHistory);
   state.plan[idx].status = "done";
   stepHistory = [];
   // A completed step is real progress: reset the per-run repeat/stale counters
@@ -646,8 +747,20 @@ function completeActiveStep(flow = flowId) {
 }
 
 function finish() {
+  if (isReportTicket(state.ticket) && !deliveredResponse) {
+    state.status = "error";
+    state.pendingAction = null;
+    workTabId = null;
+    const message =
+      "Stopped before completion: the task asks for a final answer/report, but the model tried to finish without sending one.";
+    state.error = message;
+    pushMsg("system", `⚠️ ${message}`);
+    broadcast();
+    return;
+  }
   state.status = "done";
   state.pendingAction = null;
+  workTabId = null; // Run is over — release the pinned tab.
   pushMsg("agent", "✅ All steps complete.");
   broadcast();
 }
@@ -782,14 +895,26 @@ chrome.runtime.onMessage.addListener((msg: PanelToBg, _sender, sendResponse) => 
         cancelFlow();
         state = freshState();
         stepHistory = [];
+        runHistory = [];
         resetFuse();
         pendingHost = "";
+        workTabId = null;
         broadcast();
         sendResponse({ ok: true });
         return;
     }
   })();
   return true; // keep the channel open for async sendResponse
+});
+
+// If the tab a run is pinned to is closed, stop the run: there's nothing left to
+// operate on. Abort any in-flight flow so pending continuations don't resurface,
+// then surface a clear error to the user.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (workTabId === null || tabId !== workTabId) return;
+  workTabId = null;
+  cancelFlow();
+  setError(new Error("User closed the active tab."));
 });
 
 // Clicking the toolbar icon opens the side panel. Set this on every worker

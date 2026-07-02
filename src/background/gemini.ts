@@ -77,7 +77,7 @@ export async function nextAction(
         role: "user",
         parts: [
           {
-            text: `TICKET:\n${ticket}\n\nPLAN:\n${planToText(plan)}\n\nACTIVE STEP: ${activeStep.title} — ${activeStep.detail}\n\nACTIONS SO FAR THIS STEP:\n${
+            text: `TICKET:\n${ticket}\n\nPLAN:\n${planToText(plan)}\n\nACTIVE STEP: ${activeStep.title} — ${activeStep.detail}\n\nRUN HISTORY AND EXTRACTED MATERIALS:\n${
               history.length ? history.join("\n") : "(none)"
             }\n\nCURRENT PAGE:\n${contextToText(ctx, { includeDebug: shouldIncludePageDebug(ticket, ctx) })}\n\nPropose the next action for the active step. If the step is complete, return kind="done". If you need information from the user, return kind="ask".`,
           },

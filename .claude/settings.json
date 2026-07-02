@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(grep -rn \"logStep\\\\|step.*—\\\\|\\\\` — \\\\`\\\\|stepText\\\\|formatStep\\\\|describeAction\\\\|actionLabel\" /Users/dzmitrysharko/Projects/monkey/src --include=\"*.ts\" --include=\"*.tsx\")",
-      "WebFetch(domain:ai.google.dev)"
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(echo \"---exit:$?---\")"
     ]
   }
 }

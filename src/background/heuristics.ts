@@ -40,6 +40,12 @@ export function hasExtractedText(stepHistory: string[]): boolean {
   return stepHistory.some((line) => line.includes("EXTRACTED TEXT:"));
 }
 
+export function isReportTicket(ticket: string | null): boolean {
+  return /summari|summary|summar|саммари|резюм|обобщ|explain|ответ|answer|\bwhere\b|\bhow\b|где|как|score|скор|\breport\b|репорт|отчет|отчёт|translate|перев/i.test(
+    ticket ?? "",
+  );
+}
+
 export function looksLikeQuestion(text: string): boolean {
   return /[?？؟]\s*$/.test(text.trim());
 }
