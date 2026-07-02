@@ -68,12 +68,20 @@ export function App() {
 
   // Track whether the active tab can be automated, so we can disable Go on
   // blocked pages. Re-check when the panel regains focus or tabs change.
+  // Also re-pull the agent state: this wakes the service worker if it was
+  // killed mid-run (its restart recovery kicks in), so the panel never stays
+  // frozen on a stale "working…" status.
   useEffect(() => {
-    const refresh = () =>
+    const refresh = () => {
       send({ type: "GET_TAB_STATUS" }).then((r) => {
         if (r && typeof (r as { kind?: TabKind }).kind === "string")
           setTabKind((r as { kind: TabKind }).kind);
       });
+      send({ type: "GET_STATE" }).then((r) => {
+        if (r && (r as BgToPanel).type === "STATE")
+          setState((r as { state: AgentState }).state);
+      });
+    };
     refresh();
     window.addEventListener("focus", refresh);
     chrome.tabs.onActivated.addListener(refresh);

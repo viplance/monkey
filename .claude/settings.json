@@ -3,7 +3,8 @@
     "allow": [
       "Bash(grep -rn \"logStep\\\\|step.*—\\\\|\\\\` — \\\\`\\\\|stepText\\\\|formatStep\\\\|describeAction\\\\|actionLabel\" /Users/dzmitrysharko/Projects/monkey/src --include=\"*.ts\" --include=\"*.tsx\")",
       "WebFetch(domain:ai.google.dev)",
-      "Bash(echo \"---exit:$?---\")"
+      "Bash(echo \"---exit:$?---\")",
+      "Bash(git -C /Users/dzmitrysharko/Projects/monkey log --oneline -10)"
     ]
   }
 }

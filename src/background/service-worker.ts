@@ -82,6 +82,65 @@ const MAX_FINAL_REPORT_RETRIES = 2;
 let finalReportRetries = 0;
 let deliveredResponse = false;
 
+/**
+ * Everything a run needs to survive a service worker restart. MV3 kills the
+ * worker after ~30s without extension activity, wiping all module state; the
+ * snapshot in chrome.storage.session lets a restarted worker pick the run back
+ * up instead of leaving the panel frozen on a stale "working…" broadcast.
+ */
+const RUN_SNAPSHOT_KEY = "gba.runSnapshot";
+
+interface RunSnapshot {
+  state: AgentState;
+  stepHistory: string[];
+  runHistory: string[];
+  workTabId: number | null;
+  pendingHost: string;
+  stepCount: number;
+  staleRetries: number;
+  repeatSignature: string;
+  repeatCount: number;
+  finalReportRetries: number;
+  deliveredResponse: boolean;
+}
+
+function persistRun() {
+  const snap: RunSnapshot = {
+    state,
+    stepHistory,
+    runHistory,
+    workTabId,
+    pendingHost,
+    stepCount,
+    staleRetries,
+    repeatSignature,
+    repeatCount,
+    finalReportRetries,
+    deliveredResponse,
+  };
+  void chrome.storage.session.set({ [RUN_SNAPSHOT_KEY]: snap }).catch(() => {});
+}
+
+let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * MV3 terminates the service worker after ~30s of no extension activity, and a
+ * pending fetch does NOT count as activity. A Gemini call may legitimately run
+ * longer than that (the client allows 60s), so the worker could be killed
+ * mid-request: the continuation vanishes, no error is ever delivered, and the
+ * panel shows "working…" forever. While a run is busy, ping a trivial extension
+ * API to reset the idle timer so in-flight work survives.
+ */
+function syncKeepAlive() {
+  const busy = state.status === "planning" || state.status === "running";
+  if (busy && keepAliveTimer === null) {
+    keepAliveTimer = setInterval(() => void chrome.runtime.getPlatformInfo(), 20_000);
+  } else if (!busy && keepAliveTimer !== null) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+}
+
 /** Reset the run-level circuit breaker. Call whenever a fresh run begins. */
 function resetFuse() {
   staleRetries = 0;
@@ -184,6 +243,10 @@ function pushMsg(role: ChatMessage["role"], text: string, awaitingAnswer = false
 
 function broadcast() {
   chrome.runtime.sendMessage({ type: "STATE", state }).catch(() => {});
+  // Every observable state change also adjusts the keepalive and persists the
+  // run, so a worker restart can never strand the panel on a stale status.
+  syncKeepAlive();
+  persistRun();
 }
 
 function beginFlow(): number {
@@ -809,10 +872,61 @@ function waitForTabLoad(tabId: number): Promise<boolean> {
   });
 }
 
+// --- recovery after a worker restart ---------------------------------------
+
+/**
+ * Restore the last run from storage.session into a freshly started worker. If
+ * the worker died while busy (planning/running), the async continuation is
+ * gone and the run can't make progress on its own — downgrade it to "paused"
+ * so the user sees an honest status and can press Resume, instead of a
+ * "working…" spinner that never ends. Terminal and waiting states
+ * (awaiting-confirm/paused/done/error) are restored as-is, so confirming an
+ * action still works even after the worker slept while the user was thinking.
+ */
+async function rehydrate(): Promise<void> {
+  let snap: RunSnapshot | undefined;
+  try {
+    const stored = await chrome.storage.session.get(RUN_SNAPSHOT_KEY);
+    snap = stored[RUN_SNAPSHOT_KEY] as RunSnapshot | undefined;
+  } catch {
+    return;
+  }
+  // Only restore into a virgin worker; never clobber a run that has already
+  // started, and don't bother restoring an idle snapshot.
+  if (!snap?.state || snap.state.status === "idle") return;
+  if (flowId !== 0 || state.status !== "idle") return;
+
+  state = snap.state;
+  stepHistory = snap.stepHistory ?? [];
+  runHistory = snap.runHistory ?? [];
+  workTabId = snap.workTabId ?? null;
+  pendingHost = snap.pendingHost ?? "";
+  stepCount = snap.stepCount ?? 0;
+  staleRetries = snap.staleRetries ?? 0;
+  repeatSignature = snap.repeatSignature ?? "";
+  repeatCount = snap.repeatCount ?? 0;
+  finalReportRetries = snap.finalReportRetries ?? 0;
+  deliveredResponse = snap.deliveredResponse ?? false;
+
+  if (state.status === "planning" || state.status === "running") {
+    state.status = "paused";
+    state.pendingAction = null;
+    state.notice =
+      "The background worker was restarted mid-run. Press Resume to continue.";
+  }
+  broadcast();
+}
+
+const rehydrated = rehydrate();
+
 // --- message routing ------------------------------------------------------
 
 chrome.runtime.onMessage.addListener((msg: PanelToBg, _sender, sendResponse) => {
   (async () => {
+    // If the worker was just (re)started, finish restoring the previous run
+    // before handling anything — otherwise GET_STATE would answer "idle" and
+    // CONFIRM/RESUME would act on empty state.
+    await rehydrated;
     switch (msg.type) {
       case "GET_STATE":
         sendResponse({ type: "STATE", state });
