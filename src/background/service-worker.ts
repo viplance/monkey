@@ -28,9 +28,11 @@ import {
   compact,
   countCompletedActions,
   hasMeaningfulExtract,
+  isNavigationTicket,
   isReportTicket,
   isReportingStep,
   looksLikeCredentialContent,
+  looksLikeErrorPage,
   queryMatchesTicket,
   shouldFinishSatisfiedCloseRequest,
   shouldRetryTaskRestatement,
@@ -54,6 +56,18 @@ let runHistory: string[] = [];
 /** Host of the page the pending action targets, for rule creation. */
 let pendingHost = "";
 /**
+ * URL/title of the page the pending action was proposed against, captured at
+ * the same time as pendingHost. executePending runs after either an
+ * immediate auto-run or an async user confirmation — by then the model may
+ * already be looking at a fresh snapshot for the *next* action, so this is
+ * the only reliable record of "what page was this action actually taken on."
+ * Used to tag stepHistory entries so a later action on a *different* page
+ * (or the same page in a different state) is never confused for one taken
+ * here — see executePending below.
+ */
+let pendingUrl = "";
+let pendingTitle = "";
+/**
  * Host the current run started on. Auto-execute/auto-rules for "type" and
  * "navigate" are restricted to this origin — a page that gets the agent to
  * fill a field or navigate to a *different* host is exactly the exfiltration
@@ -61,6 +75,15 @@ let pendingHost = "";
  * requires a manual confirmation even if the user enabled auto-execute.
  */
 let runOriginHost = "";
+/**
+ * Last URL seen (via proposeNext's snapshot) that did NOT look like an error
+ * page, for the current run. The error-page "done" guard below offers this as
+ * a recovery target (navigate back to it) when the model tries to finish a
+ * navigation ticket while stuck on a broken page. Deliberately just a URL,
+ * not a full page snapshot — the recovery step re-navigates and re-reads the
+ * live page rather than trusting stale content.
+ */
+let lastGoodUrl = "";
 /**
  * The tab a run is pinned to. Set when a ticket starts and used for every action
  * thereafter, so the agent keeps working in *that* tab even if the user switches
@@ -91,6 +114,16 @@ const MAX_RUN_HISTORY_CHARS = 60000;
 const MAX_FINAL_REPORT_RETRIES = 2;
 let finalReportRetries = 0;
 let deliveredResponse = false;
+/**
+ * Consecutive times the model tried to end a navigation/find step with
+ * kind="done" while the current page still looks like an error page (see
+ * looksLikeErrorPage). Reset per-step like staleRetries — a step that
+ * recovers shouldn't spend a later, unrelated step's budget. Bounded so a
+ * genuinely unrecoverable site (down, geo-blocked, etc.) surfaces as an ask
+ * instead of looping forever between "done" and a rejected retry.
+ */
+let errorRecoveryRetries = 0;
+const MAX_ERROR_RECOVERY_RETRIES = 2;
 
 /**
  * Everything a run needs to survive a service worker restart. MV3 kills the
@@ -106,12 +139,16 @@ interface RunSnapshot {
   runHistory: string[];
   workTabId: number | null;
   pendingHost: string;
+  pendingUrl: string;
+  pendingTitle: string;
   runOriginHost: string;
+  lastGoodUrl: string;
   stepCount: number;
   staleRetries: number;
   repeatSignature: string;
   repeatCount: number;
   finalReportRetries: number;
+  errorRecoveryRetries: number;
   deliveredResponse: boolean;
 }
 
@@ -122,12 +159,16 @@ function persistRun() {
     runHistory,
     workTabId,
     pendingHost,
+    pendingUrl,
+    pendingTitle,
     runOriginHost,
+    lastGoodUrl,
     stepCount,
     staleRetries,
     repeatSignature,
     repeatCount,
     finalReportRetries,
+    errorRecoveryRetries,
     deliveredResponse,
   };
   void chrome.storage.session.set({ [RUN_SNAPSHOT_KEY]: snap }).catch(() => {});
@@ -160,6 +201,7 @@ function resetFuse() {
   repeatSignature = "";
   repeatCount = 0;
   finalReportRetries = 0;
+  errorRecoveryRetries = 0;
   deliveredResponse = false;
 }
 
@@ -174,9 +216,20 @@ function combinedHistory(): string[] {
     : stepHistory;
 }
 
+/**
+ * Which stepHistory entries survive into runHistory once a step completes and
+ * stepHistory itself is wiped. Originally only extract/history/navigation
+ * failures were kept — but that silently dropped every ordinary type/click/
+ * select, so the model would lose all memory of "I already typed this query"
+ * the moment a step boundary crossed, and repeat it against the site. Keep
+ * every completed action (`ACTION: `-tagged lines, which executePending now
+ * also tags with the URL/page-title the action was taken on) plus the
+ * existing extract/history/navigation-failure markers.
+ */
 function rememberCompletedStep(entries: string[]) {
   const useful = entries.filter(
     (entry) =>
+      entry.includes("ACTION: ") ||
       entry.includes("EXTRACTED TEXT:") ||
       entry.includes("History matches") ||
       entry.includes("Navigation to "),
@@ -512,6 +565,7 @@ async function startTicket(ticket: string) {
   // it aborts the run (see the onRemoved listener).
   workTabId = tab.id;
   runOriginHost = tab.kind === "ok" ? hostOf(tab.url) : "";
+  lastGoodUrl = "";
 
   state = freshState();
   state.ticket = ticket;
@@ -594,6 +648,7 @@ async function proposeNext(flow = flowId) {
       );
     }
     if (!isCurrentFlow(flow)) return;
+    if (tab.kind === "ok" && !looksLikeErrorPage(ctx)) lastGoodUrl = ctx.url;
     console.log("[Monkey] asking provider for next action…", {
       provider: settings.provider,
       url: ctx.url,
@@ -676,6 +731,29 @@ async function proposeNext(flow = flowId) {
         finishSatisfiedRequest("The popup is closed.");
         return;
       }
+      // Same failure mode as the "done" guard below, one step earlier: the
+      // model gave up and asked the user instead of finishing, but it hasn't
+      // actually tried recovering from what looks like an error page yet.
+      // Only nudge — don't block — once the recovery budget is exhausted, so
+      // this can't out-loop the "done" guard's own retry ceiling.
+      if (
+        isNavigationTicket(state.ticket) &&
+        looksLikeErrorPage(ctx) &&
+        errorRecoveryRetries < MAX_ERROR_RECOVERY_RETRIES
+      ) {
+        errorRecoveryRetries++;
+        stepHistory.push(
+          `Model asked the user instead of continuing "${step.title}", but the current page looks like an error page ` +
+            `(TITLE: "${ctx.title}"). Do not ask yet — this is a recoverable navigation failure. Try going back, ` +
+            `navigating to the site's root, or using visible site navigation/search to reach the target again` +
+            (lastGoodUrl && lastGoodUrl !== ctx.url
+              ? `, or navigate to the last working page of this run (${lastGoodUrl})`
+              : "") +
+            `.`,
+        );
+        await proposeNext(flow);
+        return;
+      }
       if (shouldTreatAskAsResponse(stepHistory, action, step)) {
         if (shouldRetryTaskRestatement(stepHistory, action.rationale)) {
           stepHistory.push(
@@ -694,6 +772,36 @@ async function proposeNext(flow = flowId) {
     }
 
     if (action.kind === "done") {
+      // The model finished a find/navigate/click step while the page it's
+      // looking at still reads as an error page (see looksLikeErrorPage).
+      // That's the "landed on 'Ошибка запроса', declared done" failure mode —
+      // reject the done, offer concrete recovery options (including the last
+      // URL that didn't look broken, if we have one), and let the model try
+      // again instead of silently reporting the task as impossible.
+      if (isNavigationTicket(state.ticket) && looksLikeErrorPage(ctx)) {
+        if (++errorRecoveryRetries > MAX_ERROR_RECOVERY_RETRIES) {
+          state.status = "paused";
+          pushMsg(
+            "agent",
+            `I'm still stuck on what looks like an error page (${ctx.url}) after ${MAX_ERROR_RECOVERY_RETRIES} recovery attempts for "${step.title}". How should I proceed?`,
+            true,
+          );
+          broadcast();
+          return;
+        }
+        stepHistory.push(
+          `Model tried to finish "${step.title}" with kind="done", but the current page looks like an error page ` +
+            `(TITLE: "${ctx.title}"). This is a recoverable navigation failure, not task completion — do not return ` +
+            `kind="done" or kind="ask" yet. Try, in order: go back to the previous page, navigate to the site's root, ` +
+            `use visible site navigation/search to reach the target section again` +
+            (lastGoodUrl && lastGoodUrl !== ctx.url
+              ? `, or navigate to the last working page of this run (${lastGoodUrl})`
+              : "") +
+            `. Only use kind="ask" if none of these recovery paths are available.`,
+        );
+        await proposeNext(flow);
+        return;
+      }
       if (needsFinalReport(step)) {
         if (++finalReportRetries > MAX_FINAL_REPORT_RETRIES) {
           setError(
@@ -724,6 +832,8 @@ async function proposeNext(flow = flowId) {
       if (!queryMatchesTicket(query, state.ticket)) {
         state.pendingAction = action;
         pendingHost = hostOf(ctx.url);
+        pendingUrl = ctx.url;
+        pendingTitle = ctx.title;
         pushMsg(
           "agent",
           `Search browsing history for "${query}"? This isn't obviously related to your request — confirm before I look it up.`,
@@ -744,6 +854,8 @@ async function proposeNext(flow = flowId) {
 
     state.pendingAction = action;
     pendingHost = hostOf(ctx.url);
+    pendingUrl = ctx.url;
+    pendingTitle = ctx.title;
     pushMsg("agent", describe(action));
 
     // Auto-run when global auto-execute is on, or an auto-approval rule matches
@@ -909,10 +1021,16 @@ async function executePending(flow = flowId) {
     // A successful action clears the stale-ref retry budget.
     staleRetries = 0;
 
+    // Tag with the URL/title of the page the action was actually taken on
+    // (captured in pendingUrl/pendingTitle when it was proposed) — the same
+    // ref or the same-looking field can exist on multiple pages or in
+    // multiple states of the same page, so a later step reading this history
+    // needs to know *where* this happened, not just *that* it happened.
+    const onPage = pendingUrl ? ` (on ${pendingUrl}${pendingTitle ? ` "${pendingTitle}"` : ""})` : "";
     stepHistory.push(
       extractedText
-        ? `✓ ${describe(action)}\nACTION: ${actionSignature(action)}\nEXTRACTED TEXT:\n${extractedText}`
-        : `✓ ${describe(action)}\nACTION: ${actionSignature(action)}`,
+        ? `✓ ${describe(action)}${onPage}\nACTION: ${actionSignature(action)}\nEXTRACTED TEXT:\n${extractedText}`
+        : `✓ ${describe(action)}${onPage}\nACTION: ${actionSignature(action)}`,
     );
     // Clear any highlight on the current page (skip after navigation — it's a
     // fresh page with nothing highlighted, and may briefly be unscriptable).
@@ -944,6 +1062,7 @@ function completeActiveStep(flow = flowId) {
   staleRetries = 0;
   repeatSignature = "";
   repeatCount = 0;
+  errorRecoveryRetries = 0;
   const next = state.plan[idx + 1];
   if (next) {
     next.status = "active";
@@ -1064,12 +1183,16 @@ async function rehydrate(): Promise<void> {
   runHistory = snap.runHistory ?? [];
   workTabId = snap.workTabId ?? null;
   pendingHost = snap.pendingHost ?? "";
+  pendingUrl = snap.pendingUrl ?? "";
+  pendingTitle = snap.pendingTitle ?? "";
   runOriginHost = snap.runOriginHost ?? "";
+  lastGoodUrl = snap.lastGoodUrl ?? "";
   stepCount = snap.stepCount ?? 0;
   staleRetries = snap.staleRetries ?? 0;
   repeatSignature = snap.repeatSignature ?? "";
   repeatCount = snap.repeatCount ?? 0;
   finalReportRetries = snap.finalReportRetries ?? 0;
+  errorRecoveryRetries = snap.errorRecoveryRetries ?? 0;
   deliveredResponse = snap.deliveredResponse ?? false;
 
   if (state.status === "planning" || state.status === "running") {
@@ -1178,7 +1301,10 @@ chrome.runtime.onMessage.addListener((msg: PanelToBg, _sender, sendResponse) => 
         runHistory = [];
         resetFuse();
         pendingHost = "";
+        pendingUrl = "";
+        pendingTitle = "";
         runOriginHost = "";
+        lastGoodUrl = "";
         workTabId = null;
         broadcast();
         sendResponse({ ok: true });

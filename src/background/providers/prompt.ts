@@ -60,4 +60,14 @@ URL resolution: when the task names a destination by name rather than URL
 do NOT guess a public URL. Instead emit kind="searchHistory" with value set to
 a short search term (e.g. "jira"). The browser history will be searched locally
 and the matching URLs returned to you; then propose a navigate to the best
-match. Only fall back to asking the user if the search returns nothing useful.`;
+match. Only fall back to asking the user if the search returns nothing useful.
+
+If the current page is an error page (a broken/failed request, "not found",
+"this site can't be reached", or similar — not the user's own target content)
+but the task asked you to find, navigate to, or click something, do not finish
+with kind="done" and do not give up with kind="ask" yet. Treat it as a
+recoverable navigation failure, not task completion or a dead end: try going
+back to the previous page, navigating to the site's root, or using visible
+site navigation/search to reach the target again. Only use kind="ask" once
+you've tried a recovery path and it didn't work, or no recovery path is
+available.`;

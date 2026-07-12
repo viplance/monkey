@@ -6,7 +6,7 @@
  */
 
 import { looksLikeCredentialContent as sharedLooksLikeCredentialContent } from "../shared/redact";
-import type { AgentAction, ChatMessage, PlanStep } from "../shared/types";
+import type { AgentAction, ChatMessage, PageContext, PlanStep } from "../shared/types";
 
 export function compact(s: string, max = 600): string {
   const text = s.replace(/\s+/g, " ").trim();
@@ -44,6 +44,33 @@ export function hasExtractedText(stepHistory: string[]): boolean {
 export function isReportTicket(ticket: string | null): boolean {
   return /summari|summary|summar|саммари|резюм|обобщ|explain|ответ|answer|\bwhere\b|\bhow\b|где|как|score|скор|\breport\b|репорт|отчет|отчёт|translate|перев/i.test(
     ticket ?? "",
+  );
+}
+
+/**
+ * True if the ticket asks the agent to locate/reach something on a site
+ * (find/open/navigate/click/go to …). Used to scope the error-page "done"
+ * guard below to tasks where finishing on a broken page is actually wrong —
+ * a report/summary ticket already has its own finish guard (needsFinalReport
+ * in service-worker.ts), and gating every ticket kind on this would fight it.
+ */
+export function isNavigationTicket(ticket: string | null): boolean {
+  return /\b(find|open|navigate|go\s*to|click|search|locate|visit)\b|найди|найти|перейди|перейти|открой|открыть|зайди|зайти|нажми|нажать|кликни|поищи|поискать/i.test(
+    ticket ?? "",
+  );
+}
+
+/**
+ * Heuristic "we're stuck on an error page" signal, checked against the raw
+ * page context (title/text), not a trusted classification — a page can put
+ * any text it wants in its own title or body. This is only ever used to push
+ * the model toward recovery (retry navigation, go back, ask), never to skip a
+ * confirmation or widen what's auto-run, so a false positive just costs an
+ * extra planning turn and a false negative just misses a nudge.
+ */
+export function looksLikeErrorPage(ctx: Pick<PageContext, "title" | "textExcerpt">): boolean {
+  return /(?:^|\W)(?:error|not\s*found|404|request\s*failed|page\s*(?:can'?t|cannot)\s*be\s*(?:displayed|found)|this\s*site\s*can'?t\s*be\s*reached)(?:\W|$)|ошибка\s*(?:запроса|соединения|сервера|страниц)|страниц[а-я]*\s*не\s*найдена|не\s*удалось\s*(?:загрузить|подключиться|открыть)/i.test(
+    `${ctx.title} ${ctx.textExcerpt}`.slice(0, 500),
   );
 }
 
