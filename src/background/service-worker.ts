@@ -30,6 +30,8 @@ import {
   hasMeaningfulExtract,
   isReportTicket,
   isReportingStep,
+  looksLikeCredentialContent,
+  queryMatchesTicket,
   shouldFinishSatisfiedCloseRequest,
   shouldRetryTaskRestatement,
   shouldTreatAskAsResponse,
@@ -51,6 +53,14 @@ let stepHistory: string[] = [];
 let runHistory: string[] = [];
 /** Host of the page the pending action targets, for rule creation. */
 let pendingHost = "";
+/**
+ * Host the current run started on. Auto-execute/auto-rules for "type" and
+ * "navigate" are restricted to this origin — a page that gets the agent to
+ * fill a field or navigate to a *different* host is exactly the exfiltration
+ * step used by prompt-injection attacks like BioShocking, so that hop always
+ * requires a manual confirmation even if the user enabled auto-execute.
+ */
+let runOriginHost = "";
 /**
  * The tab a run is pinned to. Set when a ticket starts and used for every action
  * thereafter, so the agent keeps working in *that* tab even if the user switches
@@ -96,6 +106,7 @@ interface RunSnapshot {
   runHistory: string[];
   workTabId: number | null;
   pendingHost: string;
+  runOriginHost: string;
   stepCount: number;
   staleRetries: number;
   repeatSignature: string;
@@ -111,6 +122,7 @@ function persistRun() {
     runHistory,
     workTabId,
     pendingHost,
+    runOriginHost,
     stepCount,
     staleRetries,
     repeatSignature,
@@ -220,6 +232,43 @@ function isAutoApproved(action: AgentAction, host: string): boolean {
   });
 }
 
+/**
+ * Final gate before an action is allowed to run without a manual click, on
+ * top of global auto-execute / per-rule approval. Blocks the origin-hopping
+ * pattern a page-content prompt-injection attack (e.g. BioShocking) relies on
+ * for exfiltration: getting the agent to navigate or type into a host other
+ * than the one the run started on (e.g. a hidden form posting to an attacker
+ * domain). Credential-shaped *content* can only be judged once "extract" has
+ * actually run (the rationale is just the model's pre-execution guess at why,
+ * not the page data) — see the reply.extracted check in executePending,
+ * which pauses the run instead of green-lighting further auto-actions.
+ */
+function isSafeToAutoRun(action: AgentAction, host: string): boolean {
+  if ((action.kind === "navigate" || action.kind === "type") && runOriginHost) {
+    const targetHost =
+      action.kind === "navigate" && action.url ? hostOf(action.url) : host;
+    if (targetHost && targetHost !== runOriginHost) return false;
+  }
+  return true;
+}
+
+/**
+ * When the user manually confirms a pending "navigate" to a different host,
+ * treat that as them steering the run there on purpose and widen the trusted
+ * origin to match — otherwise every legitimate multi-site task (search on A,
+ * open a result on B) would need a manual click for every action on B for the
+ * rest of the run. Only manual confirmation widens the origin; an
+ * auto-approved navigate (still possible via DEFAULT_RULES) never does, so a
+ * malicious page can't use its own auto-run navigate to relocate trust.
+ */
+function widenRunOriginOnManualNavigate() {
+  const action = state.pendingAction;
+  if (action?.kind === "navigate" && action.url) {
+    const targetHost = hostOf(action.url);
+    if (targetHost) runOriginHost = targetHost;
+  }
+}
+
 function freshState(): AgentState {
   return {
     status: "idle",
@@ -296,9 +345,20 @@ function setError(e: unknown) {
 
 // --- settings -------------------------------------------------------------
 
+/** Ids of shipped default rules retired from DEFAULT_RULES over time — dropped
+ * from any persisted settings on load so removing one from the defaults
+ * actually takes effect for existing installs, not just fresh ones. */
+const RETIRED_BUILTIN_RULE_IDS = new Set(["builtin-extract"]);
+
 async function loadSettings(): Promise<Settings> {
   const stored = await chrome.storage.local.get(STORAGE_KEY);
   settings = { ...DEFAULT_SETTINGS, ...(stored[STORAGE_KEY] ?? {}) };
+  if (settings.autoRules?.some((r) => RETIRED_BUILTIN_RULE_IDS.has(r.id))) {
+    settings = {
+      ...settings,
+      autoRules: settings.autoRules.filter((r) => !RETIRED_BUILTIN_RULE_IDS.has(r.id)),
+    };
+  }
   return settings;
 }
 
@@ -436,6 +496,7 @@ async function startTicket(ticket: string) {
   // switching tabs no longer redirects the agent to the wrong page, and closing
   // it aborts the run (see the onRemoved listener).
   workTabId = tab.id;
+  runOriginHost = tab.kind === "ok" ? hostOf(tab.url) : "";
 
   state = freshState();
   state.ticket = ticket;
@@ -633,20 +694,25 @@ async function proposeNext(flow = flowId) {
 
     // searchHistory is an internal "thinking" action: resolve a named
     // destination to a URL locally, feed the matches back, and immediately ask
-    // for the next action. Nothing on the page changes, so there's no
-    // confirmation step.
+    // for the next action. Nothing on the page changes, so it normally skips
+    // confirmation — but it does expose local browsing destinations to the
+    // model, so a query that isn't traceable to the user's own ticket (e.g.
+    // one steered by page-injected content) must be confirmed like any other
+    // action instead of running silently.
     if (action.kind === "searchHistory") {
       const query = action.value ?? "";
-      const results = await searchHistory(query, settings.useHistory);
-      pushMsg("agent", `Looked up history for "${query}".`);
-      stepHistory.push(
-        results
-          ? `History matches for "${query}":\n${results}`
-          : `History search for "${query}" found no matches${
-              settings.useHistory ? "" : " (history lookup is disabled in Settings)"
-            }.`,
-      );
-      await proposeNext(flow);
+      if (!queryMatchesTicket(query, state.ticket)) {
+        state.pendingAction = action;
+        pendingHost = hostOf(ctx.url);
+        pushMsg(
+          "agent",
+          `Search browsing history for "${query}"? This isn't obviously related to your request — confirm before I look it up.`,
+        );
+        state.status = "awaiting-confirm";
+        broadcast();
+        return;
+      }
+      await runSearchHistory(action, flow);
       return;
     }
 
@@ -661,8 +727,12 @@ async function proposeNext(flow = flowId) {
     pushMsg("agent", describe(action));
 
     // Auto-run when global auto-execute is on, or an auto-approval rule matches
-    // this action on this host (e.g. the user previously chose "always allow").
-    if (settings.autoExecute || isAutoApproved(action, pendingHost)) {
+    // this action on this host (e.g. the user previously chose "always allow") —
+    // but never bypass isSafeToAutoRun's cross-origin / credential checks.
+    if (
+      (settings.autoExecute || isAutoApproved(action, pendingHost)) &&
+      isSafeToAutoRun(action, pendingHost)
+    ) {
       await executePending(flow);
     } else {
       state.status = "awaiting-confirm";
@@ -690,10 +760,31 @@ function finishSatisfiedRequest(message: string) {
   finish();
 }
 
+/** Run a searchHistory action (confirmed or auto-approved) and loop. */
+async function runSearchHistory(action: AgentAction, flow: number) {
+  const query = action.value ?? "";
+  const results = await searchHistory(query, settings.useHistory);
+  if (!isCurrentFlow(flow)) return;
+  pushMsg("agent", `Looked up history for "${query}".`);
+  stepHistory.push(
+    results
+      ? `History matches for "${query}":\n${results}`
+      : `History search for "${query}" found no matches${
+          settings.useHistory ? "" : " (history lookup is disabled in Settings)"
+        }.`,
+  );
+  state.pendingAction = null;
+  await proposeNext(flow);
+}
+
 async function executePending(flow = flowId) {
   if (!isCurrentFlow(flow)) return;
   const action = state.pendingAction;
   if (!action) return;
+  if (action.kind === "searchHistory") {
+    await runSearchHistory(action, flow);
+    return;
+  }
   try {
     let extractedText: string | undefined;
     if (action.kind === "navigate" && action.url) {
@@ -723,6 +814,16 @@ async function executePending(flow = flowId) {
       }
       pushMsg("system", "Page loaded. Reading it…");
       broadcast();
+      // A run that started on a blank tab has no origin to protect yet — seed
+      // it from the first page it lands on so the cross-origin gate in
+      // isSafeToAutoRun actually engages for the rest of the run. Only seeds
+      // when empty: once a real origin is set, only a manually-confirmed
+      // navigate (see widenRunOriginOnManualNavigate) may change it — an
+      // auto-approved navigate must never get to redefine "home".
+      if (!runOriginHost) {
+        const landedHost = hostOf(action.url);
+        if (landedHost) runOriginHost = landedHost;
+      }
     } else if (action.kind === "waitFor") {
       await new Promise((r) => setTimeout(r, 1200));
       if (!isCurrentFlow(flow)) return;
@@ -757,6 +858,24 @@ async function executePending(flow = flowId) {
       if (reply.type === "EXECUTE_RESULT" && reply.extracted) {
         extractedText = reply.extracted;
         pushMsg("agent", `Extracted: ${compact(reply.extracted)}`);
+        // The rationale can't be checked before execution — it's the model's
+        // guess at *why*, not the page data itself — so this is the earliest
+        // point the real content is known. If it looks credential-shaped,
+        // don't just warn: pause the run so a page can't chain this straight
+        // into an auto-approved type/navigate that ships the data out.
+        if (looksLikeCredentialContent(reply.extracted)) {
+          pushMsg(
+            "system",
+            "⚠️ The extracted content looks like it may include a password, API key, or token. Pausing for review before continuing.",
+          );
+          stepHistory.push(
+            `✓ ${describe(action)}\nACTION: ${actionSignature(action)}\nEXTRACTED TEXT:\n${extractedText}`,
+          );
+          state.pendingAction = null;
+          state.status = "paused";
+          broadcast();
+          return;
+        }
       }
       // A type-with-submit (pressed Enter) may kick off a full navigation
       // (classic search forms) or an in-page SPA update. Wait for it to settle
@@ -925,6 +1044,7 @@ async function rehydrate(): Promise<void> {
   runHistory = snap.runHistory ?? [];
   workTabId = snap.workTabId ?? null;
   pendingHost = snap.pendingHost ?? "";
+  runOriginHost = snap.runOriginHost ?? "";
   stepCount = snap.stepCount ?? 0;
   staleRetries = snap.staleRetries ?? 0;
   repeatSignature = snap.repeatSignature ?? "";
@@ -990,10 +1110,12 @@ chrome.runtime.onMessage.addListener((msg: PanelToBg, _sender, sendResponse) => 
         await proposeNext(flowId);
         return;
       case "CONFIRM_ACTION":
+        widenRunOriginOnManualNavigate();
         sendResponse({ ok: true });
         await executePending(flowId);
         return;
       case "CONFIRM_ACTION_ALWAYS":
+        widenRunOriginOnManualNavigate();
         sendResponse({ ok: true });
         if (state.pendingAction) {
           await addRuleFromAction(state.pendingAction, msg.scope);
@@ -1036,6 +1158,7 @@ chrome.runtime.onMessage.addListener((msg: PanelToBg, _sender, sendResponse) => 
         runHistory = [];
         resetFuse();
         pendingHost = "";
+        runOriginHost = "";
         workTabId = null;
         broadcast();
         sendResponse({ ok: true });

@@ -16,6 +16,16 @@ function compactDebugValue(value: unknown): string {
   }
 }
 
+// This script runs in the page's own MAIN world (it needs direct access to
+// window.onerror/unhandledrejection before the page's own handlers can
+// intercept them), which means a page script can always forge a postMessage
+// on this exact channel — no secret set up in this world stays hidden from
+// the page, since it's the same `window` and MAIN-world scripts have no
+// chrome.* APIs to coordinate a token through a channel the page can't see.
+// The collector on the other end (./page-debug.ts) treats every entry here as
+// page-controllable data, not a source of instructions: it's rendered inside
+// the untrusted-content delimiters and capped in size/count so a forged flood
+// can't crowd out real page content or itself be mistaken for a directive.
 function emitDebug(payload: Record<string, unknown>) {
   try {
     window.postMessage(

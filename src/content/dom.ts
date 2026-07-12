@@ -41,3 +41,34 @@ export function normalizedText(el: Element | HTMLElement | null | undefined): st
   if (!(el instanceof HTMLElement)) return "";
   return el.innerText.replace(/\s+/g, " ").trim();
 }
+
+/** input[type] values that commonly hold secrets — never send their raw value. */
+const SENSITIVE_INPUT_TYPES = new Set(["password", "hidden"]);
+
+/** Field name/autocomplete/label hints that suggest a secret even on type="text". */
+const SENSITIVE_FIELD_RE =
+  /pass(?:word|wd|code)|secret|token|api[_-]?key|auth|otp|one[_-]?time|cvv|cvc|card[_-]?number|ssn|pin\b/i;
+
+/**
+ * True if this element's value should never be sent to the model verbatim.
+ * Covers password/hidden inputs and text-like fields whose name/id/autocomplete/
+ * placeholder/label mark them as a credential or one-time-code field (many
+ * login and MFA forms use type="text" for these). Redacting by type alone
+ * would miss those. `label` is the computed label (labelFor(el)) — pass it in
+ * rather than recomputing here since the caller already has it.
+ */
+export function isSensitiveField(el: Element, label = ""): boolean {
+  const input = el as HTMLInputElement;
+  const type = (input.type || "").toLowerCase();
+  if (SENSITIVE_INPUT_TYPES.has(type)) return true;
+  const hints = [
+    input.name,
+    input.id,
+    input.getAttribute("autocomplete"),
+    input.placeholder,
+    label,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return SENSITIVE_FIELD_RE.test(hints);
+}

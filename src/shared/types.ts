@@ -191,12 +191,14 @@ export interface Settings {
 }
 
 /**
- * Default rules: navigation and search/extract are low-risk and noisy to
- * confirm, so they're auto-approved out of the box (the user can delete them).
+ * Default rules: only actions that can't move data off the page are
+ * auto-approved out of the box (the user can still add more, e.g. extract).
+ * "extract" reads page content — which may include credentials or other
+ * sensitive data surfaced by a malicious page — so it always requires
+ * confirmation unless the user explicitly opts in.
  */
 export const DEFAULT_RULES: AutoRule[] = [
   { id: "builtin-navigate", kind: "navigate", host: "*", label: "Navigate to any URL", builtin: true },
-  { id: "builtin-extract", kind: "extract", host: "*", label: "Extract page content", builtin: true },
   { id: "builtin-scroll", kind: "scrollTo", host: "*", label: "Scroll to elements", builtin: true },
   { id: "builtin-wait", kind: "waitFor", host: "*", label: "Wait for the page", builtin: true },
 ];

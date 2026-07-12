@@ -5,6 +5,7 @@
  * slice of state (step history, chat messages, ticket) as arguments.
  */
 
+import { looksLikeCredentialContent as sharedLooksLikeCredentialContent } from "../shared/redact";
 import type { AgentAction, ChatMessage, PlanStep } from "../shared/types";
 
 export function compact(s: string, max = 600): string {
@@ -65,6 +66,34 @@ export function shouldTreatAskAsResponse(
     !looksLikeQuestion(action.rationale) &&
     (hasExtractedText(stepHistory) || isReportingStep(step))
   );
+}
+
+/**
+ * Heuristic check for credential-shaped content in extracted page text —
+ * password-manager fills, API keys, tokens, auth headers. A page that
+ * surfaces this to an "extract" action is a red flag for the BioShocking-
+ * style pattern (trick the agent into reading + relaying secrets), so such
+ * extracts should never be silently auto-approved. Shared with the content
+ * script's textExcerpt redaction (../shared/redact) so both checks stay in
+ * sync.
+ */
+export const looksLikeCredentialContent = sharedLooksLikeCredentialContent;
+
+/**
+ * True if `query` is plausibly something the user actually asked to resolve —
+ * a substring of their ticket (or vice versa for short queries). searchHistory
+ * results (local browsing destinations) get fed straight back into model
+ * context, so a page-injected instruction that gets the model to search for
+ * an attacker-chosen term (e.g. "bank", "admin portal") would otherwise leak
+ * the user's browsing history to the model unconfirmed. Restricting
+ * unconfirmed lookups to terms traceable to the user's own ticket closes that
+ * off without breaking the normal "open Jira" / "go to our dashboard" flow.
+ */
+export function queryMatchesTicket(query: string, ticket: string | null): boolean {
+  const q = query.trim().toLowerCase();
+  const t = (ticket ?? "").trim().toLowerCase();
+  if (!q || !t) return false;
+  return t.includes(q) || (q.length >= 3 && q.includes(t));
 }
 
 export function isCloseOrDismissTicket(ticket: string | null): boolean {
