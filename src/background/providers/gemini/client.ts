@@ -1,7 +1,8 @@
 /** Low-level transport for the Gemini generateContent REST endpoint. */
 
-import { PLANNER_SYSTEM } from "./prompt";
-import type { GeminiContent, GeminiPart, GeminiTool } from "./types";
+import { PLANNER_SYSTEM } from "../prompt";
+import type { ProviderTool } from "../types";
+import type { GeminiContent, GeminiPart } from "./types";
 
 export const BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -29,11 +30,12 @@ function thinkingConfigFor(model: string): Record<string, unknown> | undefined {
 export async function call(
   apiKey: string,
   model: string,
-  contents: GeminiContent[],
-  tool: GeminiTool,
+  text: string,
+  tool: ProviderTool,
   toolName: string,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
+  const contents: GeminiContent[] = [{ role: "user", parts: [{ text }] }];
   let lastErr: Error | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -55,7 +57,7 @@ async function attemptCall(
   apiKey: string,
   model: string,
   contents: GeminiContent[],
-  tool: GeminiTool,
+  tool: ProviderTool,
   toolName: string,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {

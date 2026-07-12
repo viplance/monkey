@@ -2,7 +2,7 @@
 
 import { resolveRef } from "./refs";
 
-const HL_CLASS = "__gba_highlight__";
+const HL_CLASS = "__monkey_highlight__";
 let styleInjected = false;
 
 function ensureStyle() {

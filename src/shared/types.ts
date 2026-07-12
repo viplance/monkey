@@ -129,7 +129,7 @@ export type PanelToBg =
   | { type: "RESET" }
   | { type: "SAVE_SETTINGS"; settings: Settings }
   | { type: "GET_SETTINGS" }
-  | { type: "LIST_MODELS"; apiKey: string }
+  | { type: "LIST_MODELS"; provider: AiProvider; apiKey: string }
   | { type: "GET_TAB_STATUS" };
 
 /** Automatability of the active tab, as seen by the panel. */
@@ -173,8 +173,15 @@ export interface AutoRule {
   builtin?: boolean;
 }
 
+export type AiProvider = "gemini" | "openai" | "anthropic";
+
 export interface Settings {
-  apiKey: string;
+  /** Selected LLM provider for planning/action proposals. */
+  provider: AiProvider;
+  /** Backward-compatible Gemini key slot from older installs. */
+  apiKey?: string;
+  /** API keys are stored locally per provider. */
+  apiKeys: Record<AiProvider, string>;
   model: string;
   /** When true, run steps without confirming each individual action. */
   autoExecute: boolean;
@@ -204,27 +211,53 @@ export const DEFAULT_RULES: AutoRule[] = [
 ];
 
 /**
- * Fallback model list shown before a key is entered (or if ListModels fails).
+ * Fallback model lists shown before a key is entered (or if ListModels fails).
  * Once a valid key is saved the Settings view replaces this with the live list
- * from the API. Newest/most-capable first. Keep IDs in sync with what the
- * Gemini API actually serves — the live fetch is the source of truth.
+ * from that provider when possible. Keep these current enough to be useful,
+ * but the live fetch is the source of truth for account-specific access.
  */
-export const FALLBACK_MODELS = [
-  "gemini-3.5-flash",
-  "gemini-3.1-pro",
-  "gemini-3-flash",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
-];
+export const FALLBACK_MODELS: Record<AiProvider, string[]> = {
+  gemini: [
+    "gemini-3.5-flash",
+    "gemini-3.1-pro",
+    "gemini-3-flash",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+  ],
+  openai: [
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.6-sol",
+    "gpt-5.6",
+  ],
+  anthropic: [
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-haiku-4-5-20251001",
+  ],
+};
+
+export const DEFAULT_MODELS: Record<AiProvider, string> = {
+  gemini: "gemini-3.5-flash",
+  openai: "gpt-5.6-luna",
+  anthropic: "claude-sonnet-5",
+};
 
 export const DEFAULT_SETTINGS: Settings = {
+  provider: "gemini",
   apiKey: "",
+  apiKeys: {
+    gemini: "",
+    openai: "",
+    anthropic: "",
+  },
   // Fast, capable default; users can pick any model their key supports.
-  model: "gemini-3.5-flash",
+  model: DEFAULT_MODELS.gemini,
   autoExecute: false,
   autoRules: DEFAULT_RULES,
   useHistory: true,
 };
 
-export const STORAGE_KEY = "gba.settings";
+export const STORAGE_KEY = "monkey.settings";

@@ -100,8 +100,9 @@ export function App() {
   // tab is fine — the agent navigates away first. Answering a question is
   // always allowed regardless of the page.
   const pageBlocked = tabKind === "blocked";
+  const activeApiKey = settings.apiKeys?.[settings.provider] ?? settings.apiKey ?? "";
   const goDisabled =
-    (busy && !awaitingAnswer) || (pageBlocked && !awaitingAnswer) || !settings.apiKey;
+    (busy && !awaitingAnswer) || (pageBlocked && !awaitingAnswer) || !activeApiKey;
 
   function submitTicket() {
     const t = input.trim();
@@ -142,11 +143,11 @@ export function App() {
         </div>
       </header>
 
-      {!settings.apiKey && (
+      {!activeApiKey && (
         <div className="banner">
           No API key set.{" "}
           <button className="link" onClick={() => setShowSettings(true)}>
-            Add your Gemini key
+            Add your {settings.provider} key
           </button>{" "}
           to start.
         </div>

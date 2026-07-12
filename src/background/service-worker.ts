@@ -1,9 +1,9 @@
 /**
  * Background service worker: the orchestrator.
  *
- * Holds the single source of truth (AgentState + Settings), talks to Gemini,
- * drives the content script, and broadcasts state to the side panel. The panel
- * is a thin renderer — all decisions live here.
+ * Holds the single source of truth (AgentState + Settings), talks to the
+ * selected AI provider, drives the content script, and broadcasts state to the
+ * side panel. The panel is a thin renderer — all decisions live here.
  */
 
 import {
@@ -22,7 +22,7 @@ import {
   type TabKind,
 } from "../shared/types";
 import { describe } from "./describe";
-import { listModels, nextAction, planTicket } from "./gemini";
+import { listModels, nextAction, planTicket } from "./providers/provider-router";
 import {
   actionSignature,
   compact,
@@ -45,8 +45,8 @@ let state: AgentState = freshState();
 let settings: Settings = { ...DEFAULT_SETTINGS };
 /** Monotonic run token. Pause/reset/start invalidate older async continuations. */
 let flowId = 0;
-/** Currently active Gemini request, if any, so Pause/Reset can abort the fetch. */
-let activeGeminiAbort: AbortController | null = null;
+/** Currently active provider request, if any, so Pause/Reset can abort the fetch. */
+let activeProviderAbort: AbortController | null = null;
 /** Per-step running log of action descriptions, fed back to the model. */
 let stepHistory: string[] = [];
 /** Cross-step memory for extracted/read content needed by final report steps. */
@@ -98,7 +98,7 @@ let deliveredResponse = false;
  * snapshot in chrome.storage.session lets a restarted worker pick the run back
  * up instead of leaving the panel frozen on a stale "working…" broadcast.
  */
-const RUN_SNAPSHOT_KEY = "gba.runSnapshot";
+const RUN_SNAPSHOT_KEY = "monkey.runSnapshot";
 
 interface RunSnapshot {
   state: AgentState;
@@ -137,7 +137,7 @@ let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
  * MV3 terminates the service worker after ~30s of no extension activity, and a
- * pending fetch does NOT count as activity. A Gemini call may legitimately run
+ * pending fetch does NOT count as activity. A provider call may legitimately run
  * longer than that (the client allows 60s), so the worker could be killed
  * mid-request: the continuation vanishes, no error is ever delivered, and the
  * panel shows "working…" forever. While a run is busy, ping a trivial extension
@@ -300,8 +300,8 @@ function broadcast() {
 
 function beginFlow(): number {
   flowId += 1;
-  activeGeminiAbort?.abort();
-  activeGeminiAbort = null;
+  activeProviderAbort?.abort();
+  activeProviderAbort = null;
   return flowId;
 }
 
@@ -314,16 +314,16 @@ function isCurrentFlow(flow: number): boolean {
 }
 
 function isCanceled(e: unknown): boolean {
-  return e instanceof Error && /Gemini request canceled/i.test(e.message);
+  return e instanceof Error && /(?:Gemini|OpenAI|Anthropic) request canceled/i.test(e.message);
 }
 
-async function withGemini<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function withProvider<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const ctrl = new AbortController();
-  activeGeminiAbort = ctrl;
+  activeProviderAbort = ctrl;
   try {
     return await fn(ctrl.signal);
   } finally {
-    if (activeGeminiAbort === ctrl) activeGeminiAbort = null;
+    if (activeProviderAbort === ctrl) activeProviderAbort = null;
   }
 }
 
@@ -352,7 +352,18 @@ const RETIRED_BUILTIN_RULE_IDS = new Set(["builtin-extract"]);
 
 async function loadSettings(): Promise<Settings> {
   const stored = await chrome.storage.local.get(STORAGE_KEY);
-  settings = { ...DEFAULT_SETTINGS, ...(stored[STORAGE_KEY] ?? {}) };
+  const raw = (stored[STORAGE_KEY] ?? {}) as Partial<Settings>;
+  settings = {
+    ...DEFAULT_SETTINGS,
+    ...raw,
+    apiKeys: {
+      ...DEFAULT_SETTINGS.apiKeys,
+      ...(raw.apiKeys ?? {}),
+    },
+  };
+  if (raw.apiKey && !settings.apiKeys.gemini) {
+    settings.apiKeys.gemini = raw.apiKey;
+  }
   if (settings.autoRules?.some((r) => RETIRED_BUILTIN_RULE_IDS.has(r.id))) {
     settings = {
       ...settings,
@@ -370,6 +381,10 @@ async function loadSettings(): Promise<Settings> {
  */
 async function ensureSettings(): Promise<Settings> {
   return loadSettings();
+}
+
+function currentApiKey(): string {
+  return settings.apiKeys?.[settings.provider] ?? "";
 }
 
 // --- tab / content helpers ------------------------------------------------
@@ -470,8 +485,8 @@ async function startTicket(ticket: string) {
   // saved, wiping the in-memory copy.
   await ensureSettings();
   if (!isCurrentFlow(flow)) return;
-  if (!settings.apiKey) {
-    setError("Add your Gemini API key in Settings first.");
+  if (!currentApiKey()) {
+    setError(`Add your ${settings.provider} API key in Settings first.`);
     return;
   }
 
@@ -519,11 +534,11 @@ async function startTicket(ticket: string) {
     const ctx =
       tab.kind === "blank" ? blankContext(tab.url) : await snapshotTab(tab.id);
     if (!isCurrentFlow(flow)) return;
-    const draft = await withGemini((signal) =>
-      planTicket(settings.apiKey, settings.model, ticket, ctx, signal),
+    const draft = await withProvider((signal) =>
+      planTicket(settings.provider, currentApiKey(), settings.model, ticket, ctx, signal),
     );
     if (!isCurrentFlow(flow)) return;
-    if (!draft.length) throw new Error("Gemini returned an empty plan.");
+    if (!draft.length) throw new Error("The selected provider returned an empty plan.");
 
     state.plan = draft.map((s, i): PlanStep => ({
       id: id(),
@@ -541,7 +556,7 @@ async function startTicket(ticket: string) {
   }
 }
 
-/** Ask Gemini for the next action of the active step and present it. */
+/** Ask the selected provider for the next action of the active step and present it. */
 async function proposeNext(flow = flowId) {
   if (!isCurrentFlow(flow)) return;
   const step = state.plan.find((s) => s.id === state.activeStepId);
@@ -579,10 +594,15 @@ async function proposeNext(flow = flowId) {
       );
     }
     if (!isCurrentFlow(flow)) return;
-    console.log("[GBA] asking Gemini for next action…", { url: ctx.url, model: settings.model });
-    let action = await withGemini((signal) =>
+    console.log("[Monkey] asking provider for next action…", {
+      provider: settings.provider,
+      url: ctx.url,
+      model: settings.model,
+    });
+    let action = await withProvider((signal) =>
       nextAction(
-        settings.apiKey,
+        settings.provider,
+        currentApiKey(),
         settings.model,
         state.ticket!,
         state.plan,
@@ -593,7 +613,7 @@ async function proposeNext(flow = flowId) {
       ),
     );
     if (!isCurrentFlow(flow)) return;
-    console.log("[GBA] Gemini proposed:", action);
+    console.log("[Monkey] provider proposed:", action);
 
     // Circuit breaker: catch the tight loop where the model keeps proposing the
     // *same* side-effecting action (e.g. re-navigating to an unreachable URL).
@@ -1085,7 +1105,7 @@ chrome.runtime.onMessage.addListener((msg: PanelToBg, _sender, sendResponse) => 
         return;
       case "LIST_MODELS":
         try {
-          const models = await listModels(msg.apiKey);
+          const models = await listModels(msg.provider, msg.apiKey);
           sendResponse({ ok: true, models });
         } catch (e) {
           sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) });

@@ -1,10 +1,11 @@
-# 🐵 Gemini Browser Agent
+# 🐵 Monkey Browser AI
 
 A Chrome (Manifest V3) extension that makes the browser AI-driven. You type a
-**ticket** in natural language into a side-panel chat; Gemini reads the current
-page, drafts a **short step-by-step plan**, then walks the plan one action at a
-time — **highlighting the element** it wants to touch and **asking for your
-confirmation** before it clicks, types, or navigates.
+**ticket** in natural language into a side-panel chat; your selected AI provider
+(Gemini, OpenAI, or Claude) reads the current page, drafts a **short
+step-by-step plan**, then walks the plan one action at a time — **highlighting
+the element** it wants to touch and **asking for your confirmation** before it
+clicks, types, or navigates.
 
 It can also **ask clarifying questions** when the page is ambiguous or an action
 looks risky.
@@ -12,8 +13,8 @@ looks risky.
 ## How it works
 
 ```
-Side Panel (React)  ──msg──▶  Background worker  ──REST──▶  Gemini
-   chat / plan / controls         orchestrator              (function calling)
+Side Panel (React)  ──msg──▶  Background worker  ──REST──▶  AI provider
+   chat / plan / controls         orchestrator              (tool calling)
         ▲                              │
         └──────── state ◀──────────────┤
                                        │ msg
@@ -23,9 +24,10 @@ Side Panel (React)  ──msg──▶  Background worker  ──REST──▶  
 ```
 
 - **Background service worker** ([src/background/](src/background/)) is the single
-  source of truth. It holds state, calls Gemini with **function calling** so the
-  model returns a structured plan and one structured action at a time, and drives
-  the content script. The plan/step/action loop and all confirm-gating live here.
+  source of truth. It holds state, calls the selected provider with structured
+  tool/function calling so the model returns a structured plan and one
+  structured action at a time, and drives the content script. The
+  plan/step/action loop and all confirm-gating live here.
 - **Content script** ([src/content/content-script.ts](src/content/content-script.ts)) builds a
   compact, ranked map of interactive elements (each tagged with a stable `ref`),
   draws the highlight overlay, and executes confirmed actions (`click`, `type`,
@@ -58,16 +60,12 @@ Toolchain: Vite 8, React 19, TypeScript 6, `@vitejs/plugin-react` 6, CRXJS 2.7.
 3. Click **Load unpacked** and select the **`dist/`** folder.
 4. Pin the extension and click its icon — the side panel opens.
 
-### Add your Gemini key
+### Add your AI provider key
 
-1. Get a free key at <https://aistudio.google.com/apikey>.
-2. In the side panel, click **⚙️ → Gemini API key**, paste it, **Save**.
+1. Pick a provider in **Settings**: Gemini, OpenAI, or Claude.
+2. Paste that provider's API key and click **Save**.
    The key is stored with `chrome.storage.local` (this browser only) and is sent
-   only to `generativelanguage.googleapis.com`.
-
-> The question asked **API key vs Google-account OAuth**; this build uses an
-> **API key** (AI Studio). Consumer Google accounts don't expose a clean Gemini
-> API, so OAuth was intentionally skipped.
+   only to the selected model API host.
 
 ## Using it
 
@@ -111,7 +109,7 @@ src/
   shared/types.ts         # shared types + messaging contract
   background/
     service-worker.ts     # orchestrator + message router
-    gemini.ts             # Gemini REST client (function calling)
+    gemini.ts             # provider REST facade (tool/function calling)
   content/content-script.ts  # DOM snapshot, highlight, action execution
   sidepanel/
     index.html main.tsx App.tsx Settings.tsx styles.css

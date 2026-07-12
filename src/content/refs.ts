@@ -3,7 +3,7 @@
  * resilient resolution that survives a lost map or an SPA re-render.
  *
  * Refs are fragile on their own: the map lives only as long as this module
- * instance, and `data-gba-ref` attributes are wiped whenever the SPA re-mounts
+ * instance, and `data-monkey-ref` attributes are wiped whenever the SPA re-mounts
  * a node. When that happens `refMap.get(ref)` returns nothing (or a detached
  * node) and a click fails with "Element not found". Keeping a lightweight
  * fingerprint per ref lets us find the element again by its identifying traits.
@@ -11,7 +11,7 @@
 
 import { INTERACTIVE, labelFor } from "./dom";
 
-export const REF_ATTR = "data-gba-ref";
+export const REF_ATTR = "data-monkey-ref";
 
 /**
  * Descriptors recorded at snapshot time so a ref can be re-resolved against the
@@ -31,7 +31,7 @@ let refCounter = 0;
 const refMap = new Map<string, Element>();
 const refDescriptors = new Map<string, RefDescriptor>();
 
-/** Drop all refs and their `data-gba-ref` attributes. Called per snapshot. */
+/** Drop all refs and their `data-monkey-ref` attributes. Called per snapshot. */
 export function resetRefs() {
   refMap.clear();
   refDescriptors.clear();
@@ -71,7 +71,7 @@ function isUsable(el: Element | null | undefined): el is Element {
  *
  * Order of attempts:
  *  1. the in-memory map (fast path, node still attached);
- *  2. the `data-gba-ref` attribute in the DOM (survives map loss, e.g. when the
+ *  2. the `data-monkey-ref` attribute in the DOM (survives map loss, e.g. when the
  *     content script was re-injected into a fresh module);
  *  3. the recorded descriptor — match a current interactive element by its
  *     identifying traits (tag/role/type/name/href/label). This rescues the case

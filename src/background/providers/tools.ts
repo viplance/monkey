@@ -1,7 +1,7 @@
-import type { GeminiTool } from "./types";
+import type { ProviderTool } from "./types";
 
 /** Tool the model calls to emit the plan. */
-export const planTool: GeminiTool = {
+export const planTool: ProviderTool = {
   name: "propose_plan",
   description: "Emit a short ordered plan of high-level steps for the ticket.",
   parameters: {
@@ -24,7 +24,7 @@ export const planTool: GeminiTool = {
 };
 
 /** Tool the model calls to propose the next concrete action. */
-export const actionTool: GeminiTool = {
+export const actionTool: ProviderTool = {
   name: "propose_action",
   description:
     "Propose the single next action for the active step, or ask the user.",

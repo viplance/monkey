@@ -1,7 +1,7 @@
 {
   "name": "monkey-browser-ai",
   "version": "1.0.0",
-  "description": "Chrome extension that turns natural-language tickets into step-by-step, confirm-before-act browser automation driven by Gemini.",
+  "description": "Chrome extension that turns natural-language tickets into step-by-step, confirm-before-act browser automation driven by your AI provider.",
   "type": "module",
   "packageManager": "pnpm@10.12.4",
   "engines": {

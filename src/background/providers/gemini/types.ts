@@ -13,10 +13,3 @@ export interface GeminiContent {
   role: "user" | "model";
   parts: GeminiPart[];
 }
-
-/** A function declaration passed in the `tools` array. */
-export interface GeminiTool {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-}
