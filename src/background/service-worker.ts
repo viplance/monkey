@@ -543,7 +543,18 @@ async function snapshotTab(tabId: number): Promise<PageContext> {
 
 // --- core flow ------------------------------------------------------------
 
-async function startTicket(ticket: string) {
+function continuationContext(messages: ChatMessage[]): string {
+  return messages
+    .filter((m) => m.text.trim())
+    .slice(-16)
+    .map((m) => `${m.role.toUpperCase()}: ${m.text}`)
+    .join("\n");
+}
+
+async function startTicket(
+  ticket: string,
+  options: { continueFromMessages?: ChatMessage[] } = {},
+) {
   const flow = beginFlow();
   // Fresh run: unpin any previous tab so activeTab() picks the tab currently in
   // view for planning. It gets re-pinned below once we've validated it.
@@ -581,11 +592,19 @@ async function startTicket(ticket: string) {
   runOriginHost = tab.kind === "ok" ? hostOf(tab.url) : "";
   lastGoodUrl = "";
 
+  const previousContext = continuationContext(options.continueFromMessages ?? []);
   state = freshState();
   state.ticket = ticket;
   state.status = "planning";
+  if (options.continueFromMessages?.length) {
+    state.messages = [...options.continueFromMessages];
+  }
   stepHistory = [];
-  runHistory = [];
+  runHistory = previousContext
+    ? [
+        `PREVIOUS CHAT CONTEXT:\n${previousContext}\n\nUse this as context for the user's follow-up. Do not discard the prior result unless the follow-up asks for a fresh search. If the follow-up says this/that product/item, resolve it to the concrete product named in the previous answer and prefer clicking or navigating to that exact product page instead of adding filters to rediscover it.`,
+      ]
+    : [];
   resetFuse();
   pushMsg("user", ticket);
   pushMsg(
@@ -602,8 +621,11 @@ async function startTicket(ticket: string) {
     const ctx =
       tab.kind === "blank" ? blankContext(tab.url) : await snapshotTab(tab.id);
     if (!isCurrentFlow(flow)) return;
+    const planningTicket = previousContext
+      ? `FOLLOW-UP REQUEST:\n${ticket}\n\nPREVIOUS CHAT CONTEXT:\n${previousContext}\n\nPlan only the work needed to answer the follow-up, reusing the previous result/context when relevant. If the follow-up refers to "this product", "that item", or similar, resolve it to the concrete product named in the previous answer and open/click that product directly; do not add brand/category/price filters merely to find it again.`
+      : ticket;
     const draft = await withProvider((signal) =>
-      planTicket(settings.provider, currentApiKey(), settings.model, ticket, ctx, signal),
+      planTicket(settings.provider, currentApiKey(), settings.model, planningTicket, ctx, signal),
     );
     if (!isCurrentFlow(flow)) return;
     if (!draft.length) throw new Error("The selected provider returned an empty plan.");
@@ -764,7 +786,12 @@ async function proposeNext(flow = flowId) {
       }
     }
 
-    const policyBlock = validateActionAgainstTicket(action, state.ticket, ctx);
+    const policyBlock = validateActionAgainstTicket(
+      action,
+      state.ticket,
+      ctx,
+      combinedHistory().join("\n"),
+    );
     if (policyBlock) {
       const repeatKey = actionRepeatKey(action, ctx);
       if (stepHistory.some((line) => line.includes(`ACTION POLICY BLOCKED: ${repeatKey}`))) {
@@ -942,7 +969,13 @@ function respondAndComplete(text: string) {
   pushMsg("agent", text);
   deliveredResponse = true;
   stepHistory.push(`✓ Responded to the user\nACTION: respond|ref=|value=|url=`);
-  completeActiveStep();
+  rememberCompletedStep(stepHistory);
+  for (const step of state.plan) {
+    if (step.status !== "done") step.status = "done";
+  }
+  stepHistory = [];
+  state.activeStepId = null;
+  finish();
 }
 
 function finishSatisfiedRequest(message: string) {
@@ -1357,6 +1390,10 @@ chrome.runtime.onMessage.addListener((msg: PanelToBg, _sender, sendResponse) => 
       case "START_TICKET":
         sendResponse({ ok: true });
         await startTicket(msg.ticket.trim());
+        return;
+      case "CONTINUE_TICKET":
+        sendResponse({ ok: true });
+        await startTicket(msg.ticket.trim(), { continueFromMessages: state.messages });
         return;
       case "ANSWER":
         pushMsg("user", msg.text);

@@ -75,8 +75,12 @@ function compactCriterion(text: string): string {
     .trim();
 }
 
-function ticketMentionsCriterion(ticket: string | null, criterion: string): boolean {
-  const t = normalizeForPolicy(ticket ?? "");
+function ticketMentionsCriterion(
+  ticket: string | null,
+  criterion: string,
+  extraContext = "",
+): boolean {
+  const t = normalizeForPolicy([ticket ?? "", extraContext].filter(Boolean).join("\n"));
   const c = compactCriterion(criterion);
   if (!t || !c) return false;
   if (t.includes(c)) return true;
@@ -110,10 +114,19 @@ function isBrandFilterAction(action: AgentAction, actionText: string): boolean {
   return /\b(?:brand|marka|manufacturer|бренд|марка)\b/.test(actionText);
 }
 
+function isProductPageNavigationRequest(ticket: string | null): boolean {
+  const t = normalizeForPolicy(ticket ?? "");
+  return (
+    /(?:open|go to|navigate|visit|перейди|перейти|открой|открыть|зайди|зайти)/.test(t) &&
+    /(?:product|item|page|товар|страниц|карточк)/.test(t)
+  );
+}
+
 export function validateActionAgainstTicket(
   action: AgentAction,
   ticket: string | null,
   ctx: Pick<PageContext, "elements">,
+  extraContext = "",
 ): string | null {
   if (!["click", "type", "select", "navigate"].includes(action.kind)) return null;
 
@@ -126,12 +139,13 @@ export function validateActionAgainstTicket(
     [targetText, action.rationale, action.url].filter(Boolean).join(" "),
   );
 
-  if (
-    isBrandFilterAction(action, actionText) &&
-    isSpecificFilterOption(criterionText) &&
-    !ticketMentionsCriterion(ticket, criterionText)
-  ) {
-    return `The proposed action adds a brand/manufacturer constraint ("${criterionText}") that the user did not ask for. Do not narrow the search by brand; sort or read the current results instead.`;
+  if (isBrandFilterAction(action, actionText) && isSpecificFilterOption(criterionText)) {
+    if (isProductPageNavigationRequest(ticket)) {
+      return `The proposed action applies a brand/manufacturer filter ("${criterionText}") instead of opening the product page the user asked for. Use the previous result to click or navigate to the exact product item, not to refilter the listing.`;
+    }
+    if (!ticketMentionsCriterion(ticket, criterionText, extraContext)) {
+      return `The proposed action adds a brand/manufacturer constraint ("${criterionText}") that the user did not ask for. Do not narrow the search by brand; sort or read the current results instead.`;
+    }
   }
 
   const arbitraryMinimum =
@@ -140,7 +154,7 @@ export function validateActionAgainstTicket(
     ) ||
     (/\b(?:price|fiyat|цена)\b/.test(actionText) &&
       /\b(?:from|minimum|min\.?|en az|alt|от)\b/.test(actionText));
-  if (arbitraryMinimum && !ticketMentionsCriterion(ticket, action.value ?? "")) {
+  if (arbitraryMinimum && !ticketMentionsCriterion(ticket, action.value ?? "", extraContext)) {
     return "The proposed action adds a minimum price/floor that the user did not ask for. For a cheapest-item task, a minimum price can hide the cheapest valid item; read the sorted results and reject accessories by their titles/descriptions instead.";
   }
 

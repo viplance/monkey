@@ -95,6 +95,7 @@ export function App() {
 
   const lastMsg = state.messages[state.messages.length - 1];
   const awaitingAnswer = lastMsg?.awaitingAnswer && state.status === "paused";
+  const canContinueChat = state.status === "done" || state.status === "error";
   const busy = state.status === "planning" || state.status === "running";
   // A blocked page (chrome://, store, devtools) can't start a ticket. A blank
   // tab is fine — the agent navigates away first. Answering a question is
@@ -109,6 +110,8 @@ export function App() {
     if (!t) return;
     if (awaitingAnswer) {
       send({ type: "ANSWER", text: t });
+    } else if (canContinueChat) {
+      send({ type: "CONTINUE_TICKET", ticket: t });
     } else {
       if (goDisabled) return; // guard: don't start on a blocked page
       send({ type: "START_TICKET", ticket: t });

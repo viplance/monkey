@@ -124,6 +124,7 @@ export interface AgentState {
 export type PanelToBg =
   | { type: "GET_STATE" }
   | { type: "START_TICKET"; ticket: string }
+  | { type: "CONTINUE_TICKET"; ticket: string }
   | { type: "ANSWER"; text: string }
   | { type: "CONFIRM_ACTION" }
   /** Confirm + remember: create an auto-rule. scope "site" = this host only. */
