@@ -9,7 +9,7 @@
  * fingerprint per ref lets us find the element again by its identifying traits.
  */
 
-import { INTERACTIVE, labelFor } from "./dom";
+import { CLICKABLE_CANDIDATE, INTERACTIVE, labelFor } from "./dom";
 
 export const REF_ATTR = "data-monkey-ref";
 
@@ -89,9 +89,12 @@ export function resolveRef(ref: string | undefined): Element | null {
   const desc = refDescriptors.get(ref);
   if (!desc) return null;
 
-  const candidates = Array.from(document.querySelectorAll(INTERACTIVE)).filter(
-    (el) => isUsable(el) && el.tagName.toLowerCase() === desc.tag,
-  );
+  // Search both semantic controls and the plain clickable tags the snapshot's
+  // second pass can register (div/span/li), so a ref that pointed at a custom
+  // dropdown option can be re-resolved after an SPA re-render too.
+  const candidates = Array.from(
+    document.querySelectorAll(`${INTERACTIVE}, ${CLICKABLE_CANDIDATE}`),
+  ).filter((el) => isUsable(el) && el.tagName.toLowerCase() === desc.tag);
   // Score each candidate by how many identifying traits it shares with the
   // descriptor; the best non-zero match wins. Label match is weighted highest
   // because it's the most semantically meaningful.

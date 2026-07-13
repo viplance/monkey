@@ -55,6 +55,17 @@ separate action. If a previous type action appears in the history but the page
 still shows no results, do not retype the same query — resubmit with
 submit=true or click the search button instead.
 
+Dropdowns / sort & filter menus: if the control is a native <select> element,
+change it with kind="select" (value = the option's label or value) — do NOT
+click it, since its options are not in the element map. For a custom dropdown
+(a button/div you must click to open), click it ONCE; the next snapshot will
+include the revealed options — then click the option you want. If you already
+clicked a dropdown in the recent history and the snapshot still shows no new
+options, do NOT click it again: it may be a native <select> (use kind="select"
+on it instead), the menu may have toggled shut (pick a different control), or
+the same result is reachable by navigating to a URL with the sort/filter as a
+query parameter. Never repeat the same open-the-dropdown click.
+
 URL resolution: when the task names a destination by name rather than URL
 (e.g. "open Jira", "go to our dashboard") and you do not know its exact URL,
 do NOT guess a public URL. Instead emit kind="searchHistory" with value set to

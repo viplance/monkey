@@ -25,8 +25,11 @@ import { describe } from "./describe";
 import { listModels, nextAction, planTicket } from "./providers/provider-router";
 import {
   actionSignature,
+  actionRepeatKey,
   compact,
+  countBlockedRepeatedActionAttempts,
   countCompletedActions,
+  countRepeatedActionAttempts,
   hasMeaningfulExtract,
   isNavigationTicket,
   isReportTicket,
@@ -67,6 +70,7 @@ let pendingHost = "";
  */
 let pendingUrl = "";
 let pendingTitle = "";
+let pendingRepeatKey = "";
 /**
  * Host the current run started on. Auto-execute/auto-rules for "type" and
  * "navigate" are restricted to this origin — a page that gets the agent to
@@ -110,6 +114,12 @@ const MAX_STEPS = 40;
 let repeatSignature = "";
 let repeatCount = 0;
 const MAX_REPEATS = 3;
+const NON_PROGRESS_REPEATABLE_ACTIONS: AgentAction["kind"][] = [
+  "navigate",
+  "click",
+  "type",
+  "select",
+];
 const MAX_RUN_HISTORY_CHARS = 60000;
 const MAX_FINAL_REPORT_RETRIES = 2;
 let finalReportRetries = 0;
@@ -141,6 +151,7 @@ interface RunSnapshot {
   pendingHost: string;
   pendingUrl: string;
   pendingTitle: string;
+  pendingRepeatKey: string;
   runOriginHost: string;
   lastGoodUrl: string;
   stepCount: number;
@@ -161,6 +172,7 @@ function persistRun() {
     pendingHost,
     pendingUrl,
     pendingTitle,
+    pendingRepeatKey,
     runOriginHost,
     lastGoodUrl,
     stepCount,
@@ -203,6 +215,7 @@ function resetFuse() {
   finalReportRetries = 0;
   errorRecoveryRetries = 0;
   deliveredResponse = false;
+  pendingRepeatKey = "";
 }
 
 function combinedHistory(): string[] {
@@ -628,6 +641,7 @@ async function proposeNext(flow = flowId) {
   }
   state.status = "running";
   state.pendingAction = null;
+  pendingRepeatKey = "";
   broadcast();
 
   try {
@@ -719,6 +733,26 @@ async function proposeNext(flow = flowId) {
         rationale:
           "Enough page content has been revealed; extract the loaded page content now instead of continuing to scroll.",
       };
+    }
+
+    if (NON_PROGRESS_REPEATABLE_ACTIONS.includes(action.kind)) {
+      const repeatKey = actionRepeatKey(action, ctx);
+      if (countRepeatedActionAttempts(stepHistory, repeatKey) > 0) {
+        if (countBlockedRepeatedActionAttempts(stepHistory, repeatKey) > 0) {
+          setError(
+            `Stopped: the model kept retrying an action that already ran without making progress (${describe(action)}). ` +
+              "Try a different instruction or adjust the page state, then start again.",
+          );
+          return;
+        }
+        stepHistory.push(
+          `DUPLICATE ACTION BLOCKED: ${repeatKey}\n` +
+            `Model proposed "${describe(action)}" again, but that action already ran in this step. Do not repeat it. ` +
+            `Choose a different action: submit the already-filled field, click a search/apply button, use a different visible control, read the updated page, or ask the user if the page did not change.`,
+        );
+        await proposeNext(flow);
+        return;
+      }
     }
 
     if (action.kind === "respond") {
@@ -834,6 +868,7 @@ async function proposeNext(flow = flowId) {
         pendingHost = hostOf(ctx.url);
         pendingUrl = ctx.url;
         pendingTitle = ctx.title;
+        pendingRepeatKey = actionRepeatKey(action, ctx);
         pushMsg(
           "agent",
           `Search browsing history for "${query}"? This isn't obviously related to your request — confirm before I look it up.`,
@@ -856,6 +891,7 @@ async function proposeNext(flow = flowId) {
     pendingHost = hostOf(ctx.url);
     pendingUrl = ctx.url;
     pendingTitle = ctx.title;
+    pendingRepeatKey = actionRepeatKey(action, ctx);
     pushMsg("agent", describe(action));
 
     // Auto-run when global auto-execute is on, or an auto-approval rule matches
@@ -906,6 +942,7 @@ async function runSearchHistory(action: AgentAction, flow: number) {
         }.`,
   );
   state.pendingAction = null;
+  pendingRepeatKey = "";
   await proposeNext(flow);
 }
 
@@ -941,6 +978,7 @@ async function executePending(flow = flowId) {
         );
         broadcast();
         state.pendingAction = null;
+        pendingRepeatKey = "";
         await proposeNext(flow);
         return;
       }
@@ -981,6 +1019,7 @@ async function executePending(flow = flowId) {
             `Last action failed: ${reply.error ?? "element not found"}. The page changed; pick a fresh element from the new snapshot.`,
           );
           state.pendingAction = null;
+          pendingRepeatKey = "";
           broadcast();
           await proposeNext(flow);
           return;
@@ -1001,9 +1040,10 @@ async function executePending(flow = flowId) {
             "⚠️ The extracted content looks like it may include a password, API key, or token. Pausing for review before continuing.",
           );
           stepHistory.push(
-            `✓ ${describe(action)}\nACTION: ${actionSignature(action)}\nEXTRACTED TEXT:\n${extractedText}`,
+            `✓ ${describe(action)}\nACTION: ${actionSignature(action)}\nREPEAT_KEY: ${pendingRepeatKey || actionRepeatKey(action)}\nEXTRACTED TEXT:\n${extractedText}`,
           );
           state.pendingAction = null;
+          pendingRepeatKey = "";
           state.status = "paused";
           broadcast();
           return;
@@ -1014,6 +1054,16 @@ async function executePending(flow = flowId) {
       // so the next snapshot reads the results page, not the one we just left.
       if (action.kind === "type" && action.submit) {
         await settleAfterSubmit(tabId);
+        if (!isCurrentFlow(flow)) return;
+      }
+      // A click frequently opens a menu/dropdown/dialog or applies a filter —
+      // all of which mutate the DOM *asynchronously* (React re-render, CSS
+      // transition) or trigger a navigation. Snapshotting immediately reads the
+      // pre-open page, so the model never sees the options it just revealed and
+      // re-clicks the same control until the repeat fuse stops the run (the
+      // Trendyol sort-dropdown loop). Let it settle first.
+      if (action.kind === "click") {
+        await settleAfterClick(tabId);
         if (!isCurrentFlow(flow)) return;
       }
     }
@@ -1027,10 +1077,11 @@ async function executePending(flow = flowId) {
     // multiple states of the same page, so a later step reading this history
     // needs to know *where* this happened, not just *that* it happened.
     const onPage = pendingUrl ? ` (on ${pendingUrl}${pendingTitle ? ` "${pendingTitle}"` : ""})` : "";
+    const repeatKey = pendingRepeatKey || actionRepeatKey(action);
     stepHistory.push(
       extractedText
-        ? `✓ ${describe(action)}${onPage}\nACTION: ${actionSignature(action)}\nEXTRACTED TEXT:\n${extractedText}`
-        : `✓ ${describe(action)}${onPage}\nACTION: ${actionSignature(action)}`,
+        ? `✓ ${describe(action)}${onPage}\nACTION: ${actionSignature(action)}\nREPEAT_KEY: ${repeatKey}\nEXTRACTED TEXT:\n${extractedText}`
+        : `✓ ${describe(action)}${onPage}\nACTION: ${actionSignature(action)}\nREPEAT_KEY: ${repeatKey}`,
     );
     // Clear any highlight on the current page (skip after navigation — it's a
     // fresh page with nothing highlighted, and may briefly be unscriptable).
@@ -1041,6 +1092,7 @@ async function executePending(flow = flowId) {
       if (!isCurrentFlow(flow)) return;
     }
     state.pendingAction = null;
+    pendingRepeatKey = "";
     // Loop: ask for the next action of the same step.
     await proposeNext(flow);
   } catch (e) {
@@ -1078,6 +1130,7 @@ function finish() {
   if (isReportTicket(state.ticket) && !deliveredResponse) {
     state.status = "error";
     state.pendingAction = null;
+    pendingRepeatKey = "";
     workTabId = null;
     const message =
       "Stopped before completion: the task asks for a final answer/report, but the model tried to finish without sending one.";
@@ -1088,6 +1141,7 @@ function finish() {
   }
   state.status = "done";
   state.pendingAction = null;
+  pendingRepeatKey = "";
   workTabId = null; // Run is over — release the pinned tab.
   pushMsg("agent", "✅ All steps complete.");
   broadcast();
@@ -1108,6 +1162,36 @@ async function settleAfterSubmit(tabId: number): Promise<void> {
       return;
     }
   }
+}
+
+/**
+ * After a click, give the page a beat to react before the next snapshot. A
+ * click can do one of three things, and the next snapshot must reflect the
+ * result of whichever it was:
+ *  - start a navigation (clicked a link/filter that reloads) — wait for it;
+ *  - open a menu/dropdown/dialog in-page (React re-render + CSS transition) —
+ *    a short fixed pause lets those nodes mount so the model sees the options;
+ *  - do nothing observable — the same short pause just costs a fraction of a
+ *    second.
+ * Without this, an async dropdown (e.g. Trendyol's "Önerilen Sıralama" sort
+ * menu) isn't in the DOM yet when we re-snapshot, so the model re-clicks the
+ * closed control until the repeat fuse aborts the run.
+ */
+async function settleAfterClick(tabId: number): Promise<void> {
+  // First, let a navigation (if any) declare itself; ~600ms covers the gap
+  // before the tab flips to "loading".
+  for (let i = 0; i < 3; i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) return;
+    if (tab.status === "loading") {
+      await waitForTabLoad(tabId);
+      return;
+    }
+  }
+  // No navigation — an in-page change. Wait once more for React/animation to
+  // commit the opened overlay to the DOM before the next snapshot reads it.
+  await new Promise((r) => setTimeout(r, 400));
 }
 
 /**
@@ -1185,6 +1269,7 @@ async function rehydrate(): Promise<void> {
   pendingHost = snap.pendingHost ?? "";
   pendingUrl = snap.pendingUrl ?? "";
   pendingTitle = snap.pendingTitle ?? "";
+  pendingRepeatKey = snap.pendingRepeatKey ?? "";
   runOriginHost = snap.runOriginHost ?? "";
   lastGoodUrl = snap.lastGoodUrl ?? "";
   stepCount = snap.stepCount ?? 0;
@@ -1198,6 +1283,7 @@ async function rehydrate(): Promise<void> {
   if (state.status === "planning" || state.status === "running") {
     state.status = "paused";
     state.pendingAction = null;
+    pendingRepeatKey = "";
     state.notice =
       "The background worker was restarted mid-run. Press Resume to continue.";
   }
@@ -1273,6 +1359,7 @@ chrome.runtime.onMessage.addListener((msg: PanelToBg, _sender, sendResponse) => 
           stepHistory.push("User rejected the last proposal; try a different approach.");
         }
         state.pendingAction = null;
+        pendingRepeatKey = "";
         sendResponse({ ok: true });
         await proposeNext(flowId);
         return;
@@ -1303,6 +1390,7 @@ chrome.runtime.onMessage.addListener((msg: PanelToBg, _sender, sendResponse) => 
         pendingHost = "";
         pendingUrl = "";
         pendingTitle = "";
+        pendingRepeatKey = "";
         runOriginHost = "";
         lastGoodUrl = "";
         workTabId = null;

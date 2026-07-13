@@ -57,6 +57,12 @@ export interface ElementSnapshot {
   href?: string;
   /** True when in the viewport and clickable. */
   visible: boolean;
+  /**
+   * Coarse page region (main content, an open dialog/menu, nav, header,
+   * footer, or other). Surfaced to the model so it can prefer the controls a
+   * task needs — e.g. the options of a just-opened dropdown — over page chrome.
+   */
+  region?: "dialog" | "main" | "nav" | "header" | "footer" | "other";
 }
 
 export interface PageDebugEntry {

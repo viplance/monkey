@@ -17,11 +17,46 @@ export function actionSignature(a: AgentAction): string {
   return `${a.kind}|ref=${a.ref ?? ""}|value=${a.value ?? ""}|url=${a.url ?? ""}${a.submit ? "|submit" : ""}`;
 }
 
+export function actionRepeatKey(
+  a: AgentAction,
+  ctx?: Pick<PageContext, "elements">,
+): string {
+  const target = a.ref ? ctx?.elements.find((el) => el.ref === a.ref) : undefined;
+  const targetKey = target
+    ? [
+        target.tag,
+        target.role ?? "",
+        target.label,
+        target.type ?? "",
+        target.placeholder ?? "",
+        target.href ?? "",
+      ].join("|")
+    : `ref:${a.ref ?? ""}`;
+
+  return `${a.kind}|target=${targetKey}|value=${a.value ?? ""}|url=${a.url ?? ""}${a.submit ? "|submit" : ""}`;
+}
+
 export function countCompletedActions(
   stepHistory: string[],
   kind: AgentAction["kind"],
 ): number {
   return stepHistory.filter((line) => line.includes(`ACTION: ${kind}|`)).length;
+}
+
+export function countRepeatedActionAttempts(
+  stepHistory: string[],
+  repeatKey: string,
+): number {
+  return stepHistory.filter((line) => line.includes(`REPEAT_KEY: ${repeatKey}`)).length;
+}
+
+export function countBlockedRepeatedActionAttempts(
+  stepHistory: string[],
+  repeatKey: string,
+): number {
+  return stepHistory.filter((line) =>
+    line.includes(`DUPLICATE ACTION BLOCKED: ${repeatKey}`),
+  ).length;
 }
 
 export function hasMeaningfulExtract(
