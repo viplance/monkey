@@ -59,6 +59,99 @@ export function countBlockedRepeatedActionAttempts(
   ).length;
 }
 
+function normalizeForPolicy(text: string): string {
+  return text
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function compactCriterion(text: string): string {
+  return normalizeForPolicy(text)
+    .replace(/[^\p{L}\p{N}\s.-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function ticketMentionsCriterion(ticket: string | null, criterion: string): boolean {
+  const t = normalizeForPolicy(ticket ?? "");
+  const c = compactCriterion(criterion);
+  if (!t || !c) return false;
+  if (t.includes(c)) return true;
+
+  const tokens = c
+    .split(/\s+/)
+    .filter((token) => token.length >= 3 && !/^\d+$/.test(token));
+  return tokens.length > 0 && tokens.some((token) => t.includes(token));
+}
+
+function isSpecificFilterOption(label: string): boolean {
+  const l = compactCriterion(label);
+  if (!l || l.length > 60) return false;
+  if (/^(brand|marka|бренд|марка|manufacturer|seller|price|fiyat|цена|rating|puan|рейтинг)$/.test(l)) {
+    return false;
+  }
+  return /[\p{L}\p{N}]/u.test(l);
+}
+
+function actionCriterionText(action: AgentAction, targetText: string): string {
+  if (action.kind === "type" || action.kind === "select") return action.value ?? "";
+  return targetText;
+}
+
+function isBrandFilterAction(action: AgentAction, actionText: string): boolean {
+  if (action.kind === "type") {
+    return /(?:filter|select|choose|apply|set).*\b(?:brand|marka|manufacturer|бренд|марка)\b|\b(?:brand|marka|manufacturer|бренд|марка)\b.*(?:filter|select|choose|apply|set)/.test(
+      actionText,
+    );
+  }
+  return /\b(?:brand|marka|manufacturer|бренд|марка)\b/.test(actionText);
+}
+
+export function validateActionAgainstTicket(
+  action: AgentAction,
+  ticket: string | null,
+  ctx: Pick<PageContext, "elements">,
+): string | null {
+  if (!["click", "type", "select", "navigate"].includes(action.kind)) return null;
+
+  const target = action.ref ? ctx.elements.find((el) => el.ref === action.ref) : undefined;
+  const targetText = [target?.label, target?.placeholder, target?.value, action.value]
+    .filter(Boolean)
+    .join(" ");
+  const criterionText = actionCriterionText(action, targetText);
+  const actionText = normalizeForPolicy(
+    [targetText, action.rationale, action.url].filter(Boolean).join(" "),
+  );
+
+  if (
+    isBrandFilterAction(action, actionText) &&
+    isSpecificFilterOption(criterionText) &&
+    !ticketMentionsCriterion(ticket, criterionText)
+  ) {
+    return `The proposed action adds a brand/manufacturer constraint ("${criterionText}") that the user did not ask for. Do not narrow the search by brand; sort or read the current results instead.`;
+  }
+
+  const arbitraryMinimum =
+    /(?:minimum|min\.?|min price|price floor|from price|at least|en az|alt limit|миним|нижн|от\s+\d)/.test(
+      actionText,
+    ) ||
+    (/\b(?:price|fiyat|цена)\b/.test(actionText) &&
+      /\b(?:from|minimum|min\.?|en az|alt|от)\b/.test(actionText));
+  if (arbitraryMinimum && !ticketMentionsCriterion(ticket, action.value ?? "")) {
+    return "The proposed action adds a minimum price/floor that the user did not ask for. For a cheapest-item task, a minimum price can hide the cheapest valid item; read the sorted results and reject accessories by their titles/descriptions instead.";
+  }
+
+  const ratingLike = /\b(?:rating|puan|review score|рейтинг|оценк)\b/.test(actionText);
+  if (ratingLike && !/(?:rating|puan|review score|рейтинг|оценк)/i.test(ticket ?? "")) {
+    return "The proposed action adds a rating/review constraint that the user did not ask for. Do not filter by rating unless the original request includes that criterion.";
+  }
+
+  return null;
+}
+
 export function hasMeaningfulExtract(
   stepHistory: string[],
   a: AgentAction,

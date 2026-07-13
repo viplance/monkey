@@ -40,6 +40,7 @@ import {
   shouldFinishSatisfiedCloseRequest,
   shouldRetryTaskRestatement,
   shouldTreatAskAsResponse,
+  validateActionAgainstTicket,
 } from "./heuristics";
 import { searchHistory } from "./history";
 import { NotAutomatableError, blankContext, classifyUrl, hostOf } from "./tabs";
@@ -761,6 +762,23 @@ async function proposeNext(flow = flowId) {
         await proposeNext(flow);
         return;
       }
+    }
+
+    const policyBlock = validateActionAgainstTicket(action, state.ticket, ctx);
+    if (policyBlock) {
+      const repeatKey = actionRepeatKey(action, ctx);
+      if (stepHistory.some((line) => line.includes(`ACTION POLICY BLOCKED: ${repeatKey}`))) {
+        setError(
+          `Stopped: the model kept proposing an action that changes the user's criteria (${describe(action)}).`,
+        );
+        return;
+      }
+      stepHistory.push(
+        `ACTION POLICY BLOCKED: ${repeatKey}\n${policyBlock}\n` +
+          `Choose an action that preserves the original request exactly: sort, extract/read the current results, pick the first qualifying item, or ask the user if the criterion is ambiguous.`,
+      );
+      await proposeNext(flow);
+      return;
     }
 
     if (action.kind === "respond") {
