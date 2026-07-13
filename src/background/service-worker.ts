@@ -684,13 +684,29 @@ async function proposeNext(flow = flowId) {
     if (!isCurrentFlow(flow)) return;
     console.log("[Monkey] provider proposed:", action);
 
+    // Repeated downward scrolling is legitimate progress on lazy-loading /
+    // infinite-scroll pages (each scroll reveals new results), so it must be
+    // handled BEFORE the same-signature circuit breaker below — otherwise a
+    // model that scrolls to load more content trips the breaker (a bare "scroll
+    // down" has an identical signature every time) and the run dies. After a few
+    // scrolls, convert to an extract: enough is loaded to read and decide.
+    if (action.kind === "scrollTo" && countCompletedActions(stepHistory, "scrollTo") >= 3) {
+      action = {
+        kind: "extract",
+        rationale:
+          "Enough page content has been revealed; extract the loaded page content now instead of continuing to scroll.",
+      };
+    }
+
     // Circuit breaker: catch the tight loop where the model keeps proposing the
     // *same* side-effecting action (e.g. re-navigating to an unreachable URL).
     // The page never changes, so this never makes progress — bail out instead of
     // spinning. Terminal/internal actions (respond/ask/done/searchHistory) are
-    // exempt: they either end the run or don't touch the page.
+    // exempt: they either end the run or don't touch the page. scrollTo is
+    // exempt too — repeated scrolling reveals new content (handled just above),
+    // so it isn't a non-progress loop.
     const REPEATABLE: AgentAction["kind"][] = [
-      "navigate", "click", "type", "select", "scrollTo", "waitFor", "extract",
+      "navigate", "click", "type", "select", "waitFor", "extract",
     ];
     if (REPEATABLE.includes(action.kind)) {
       const sig = actionSignature(action);
@@ -725,14 +741,6 @@ async function proposeNext(flow = flowId) {
       pushMsg("system", "Already extracted that content — moving to the next plan step.");
       completeActiveStep();
       return;
-    }
-
-    if (action.kind === "scrollTo" && countCompletedActions(stepHistory, "scrollTo") >= 3) {
-      action = {
-        kind: "extract",
-        rationale:
-          "Enough page content has been revealed; extract the loaded page content now instead of continuing to scroll.",
-      };
     }
 
     if (NON_PROGRESS_REPEATABLE_ACTIONS.includes(action.kind)) {
